@@ -111,7 +111,7 @@ Kritische oder schlechte freigegebene Messwerte werden zusätzlich in einer gut 
 
 Im Adminbereich kann unter **Wetter** eine fünfstellige deutsche Postleitzahl gespeichert werden. Das Dashboard ermittelt den zugehörigen Ort und zeigt unten mittig auf der öffentlichen Startseite aktuelle Temperatur, Wetterlage, Luftfeuchtigkeit und Wind an. Die Daten werden serverseitig zwischengespeichert und standardmäßig höchstens alle 15 Minuten neu abgerufen. Das Intervall kann mit `WEATHER_REFRESH_SECONDS` angepasst werden.
 
-Für die Ortsauflösung und Wetterdaten wird [Open-Meteo](https://open-meteo.com/) verwendet. Nichtkommerzielle Nutzung benötigt keinen API-Schlüssel. Der Docker-Container benötigt dafür ausgehenden Internetzugriff. Bei einem vorübergehenden API-Ausfall werden nach Möglichkeit die zuletzt bekannten Daten angezeigt; das übrige Dashboard bleibt funktionsfähig.
+Für die Ortsauflösung wird [OpenStreetMap Nominatim](https://nominatim.openstreetmap.org/) verwendet; die Wetterdaten stammen von [Open-Meteo](https://open-meteo.com/). Nichtkommerzielle Nutzung benötigt keinen API-Schlüssel. Der Docker-Container benötigt dafür ausgehenden Internetzugriff. Bei einem vorübergehenden API-Ausfall werden nach Möglichkeit die zuletzt bekannten Daten angezeigt; das übrige Dashboard bleibt funktionsfähig.
 
 ## E-Mail-Warnung bei niedrigem Wert
 

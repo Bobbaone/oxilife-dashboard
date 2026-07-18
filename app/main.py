@@ -183,18 +183,22 @@ def weather_location() -> dict[str, Any] | None:
 async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get("https://geocoding-api.open-meteo.com/v1/search", params={
-                "name": postal_code, "count": 10, "language": "de", "format": "json", "countryCode": "DE",
-            })
+            response = await client.get("https://nominatim.openstreetmap.org/search", params={
+                "postalcode": postal_code, "country": "Deutschland", "format": "jsonv2",
+                "limit": 1, "addressdetails": 1,
+            }, headers={"User-Agent": "Oxilife-Dashboard/1.0"})
             response.raise_for_status()
-            results = response.json().get("results", [])
+            results = response.json()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Ortsauflösung fehlgeschlagen: {exc}") from exc
-    matches = [item for item in results if postal_code in item.get("postcodes", [])]
-    item = (matches or results or [None])[0]
+    item = (results or [None])[0]
     if not item:
         raise HTTPException(status_code=404, detail="Zu dieser PLZ wurde kein Ort gefunden")
-    return {"postal_code": postal_code, "latitude": item["latitude"], "longitude": item["longitude"], "city": item["name"]}
+    address = item.get("address", {})
+    city = address.get("city") or address.get("town") or address.get("village") or address.get("municipality")
+    if not city:
+        city = item.get("display_name", postal_code).split(",")[1].strip() if "," in item.get("display_name", "") else postal_code
+    return {"postal_code": postal_code, "latitude": float(item["lat"]), "longitude": float(item["lon"]), "city": city}
 
 
 async def current_weather(force: bool = False) -> dict[str, Any]:
