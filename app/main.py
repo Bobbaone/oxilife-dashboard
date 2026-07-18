@@ -35,6 +35,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
 ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")))
+WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900")))
 COMMANDS = {
     "1": os.getenv("FILTER_SPEED_COMMAND_1", ""),
     "2": os.getenv("FILTER_SPEED_COMMAND_2", ""),
@@ -43,6 +44,8 @@ COMMANDS = {
 }
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
 poll_lock = asyncio.Lock()
+weather_lock = asyncio.Lock()
+weather_cache: dict[str, Any] = {"fetched_at": 0, "data": None, "error": None}
 
 
 class DatapointUpdate(BaseModel):
@@ -65,6 +68,10 @@ class DatapointUpdate(BaseModel):
 class PasswordChange(BaseModel):
     username: str = Field(min_length=3, max_length=80, pattern=r"^[^\s]+$")
     password: str = Field(min_length=10, max_length=200)
+
+
+class WeatherUpdate(BaseModel):
+    postal_code: str = Field(pattern=r"^\d{5}$")
 
 
 def db() -> sqlite3.Connection:
@@ -160,6 +167,68 @@ def verify_password(password: str, encoded: str) -> bool:
 def setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def weather_location() -> dict[str, Any] | None:
+    with db() as conn:
+        postal_code = setting(conn, "weather_postal_code")
+        latitude = setting(conn, "weather_latitude")
+        longitude = setting(conn, "weather_longitude")
+        city = setting(conn, "weather_city")
+    if not all((postal_code, latitude, longitude, city)):
+        return None
+    return {"postal_code": postal_code, "latitude": float(latitude), "longitude": float(longitude), "city": city}
+
+
+async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get("https://geocoding-api.open-meteo.com/v1/search", params={
+                "name": postal_code, "count": 10, "language": "de", "format": "json", "countryCode": "DE",
+            })
+            response.raise_for_status()
+            results = response.json().get("results", [])
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Ortsauflösung fehlgeschlagen: {exc}") from exc
+    matches = [item for item in results if postal_code in item.get("postcodes", [])]
+    item = (matches or results or [None])[0]
+    if not item:
+        raise HTTPException(status_code=404, detail="Zu dieser PLZ wurde kein Ort gefunden")
+    return {"postal_code": postal_code, "latitude": item["latitude"], "longitude": item["longitude"], "city": item["name"]}
+
+
+async def current_weather(force: bool = False) -> dict[str, Any]:
+    location = weather_location()
+    if not location:
+        return {"enabled": False}
+    now = int(time.time())
+    async with weather_lock:
+        if not force and weather_cache["data"] and now - weather_cache["fetched_at"] < WEATHER_REFRESH_SECONDS:
+            return weather_cache["data"]
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get("https://api.open-meteo.com/v1/forecast", params={
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+                    "timezone": "auto", "forecast_days": 1,
+                })
+                response.raise_for_status()
+                payload = response.json()
+            current = payload.get("current", {})
+            units = payload.get("current_units", {})
+            data = {"enabled": True, **location, "updated_at": now, "stale": False,
+                    "temperature": current.get("temperature_2m"), "temperature_unit": units.get("temperature_2m", "°C"),
+                    "apparent_temperature": current.get("apparent_temperature"),
+                    "humidity": current.get("relative_humidity_2m"), "weather_code": current.get("weather_code"),
+                    "wind_speed": current.get("wind_speed_10m"), "wind_unit": units.get("wind_speed_10m", "km/h"),
+                    "attribution": "Open-Meteo"}
+            weather_cache.update(fetched_at=now, data=data, error=None)
+            return data
+        except Exception as exc:
+            weather_cache["error"] = str(exc)
+            if weather_cache["data"]:
+                return {**weather_cache["data"], "stale": True, "error": str(exc)}
+            return {"enabled": True, **location, "stale": True, "error": f"Wetterdaten nicht verfügbar: {exc}"}
 
 
 def flatten(data: Any, prefix: str = "") -> dict[str, Any]:
@@ -334,6 +403,11 @@ def status():
             "datapoints": [point_dict(row, include_path=False) for row in rows]}
 
 
+@app.get("/api/weather")
+async def weather():
+    return await current_weather()
+
+
 @app.get("/api/admin/datapoints")
 def datapoints(request: Request):
     require_admin(request)
@@ -350,6 +424,24 @@ def alert_config(request: Request):
         "recipient": ALERT_EMAIL_TO,
         "cooldown_seconds": ALERT_COOLDOWN_SECONDS,
     }
+
+
+@app.get("/api/admin/weather")
+def admin_weather(request: Request):
+    require_admin(request)
+    return weather_location() or {"postal_code": "", "city": "", "enabled": False}
+
+
+@app.put("/api/admin/weather")
+async def update_weather(body: WeatherUpdate, request: Request):
+    require_admin(request)
+    location = await resolve_postal_code(body.postal_code)
+    with db() as conn:
+        for key, value in location.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)", (f"weather_{key}", str(value)))
+    weather_cache.update(fetched_at=0, data=None, error=None)
+    weather_data = await current_weather(force=True)
+    return {**location, "weather": weather_data}
 
 
 @app.put("/api/admin/datapoints/{point_id}")
@@ -470,7 +562,12 @@ def logout(request: Request):
 
 @app.get("/api/session")
 def session(request: Request):
-    return {"admin": bool(request.session.get("admin")),
+    is_admin = bool(request.session.get("admin"))
+    username = ""
+    if is_admin:
+        with db() as conn:
+            username = setting(conn, "admin_username", ADMIN_USER)
+    return {"admin": is_admin, "username": username,
             "password_change_required": bool(request.session.get("password_change_required"))}
 
 

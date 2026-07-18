@@ -54,7 +54,7 @@ docker run -d \
   ghcr.io/bobbaone/oxilife-dashboard:latest
 ```
 
-`TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Die erste Anmeldung erfolgt mit `admin` und dem Initialpasswort `wasserwerte`. Danach erzwingt das Dashboard die Erstellung eines eigenen Benutzernamens und eines individuellen Passworts mit mindestens zehn Zeichen. Die neuen Zugangsdaten werden persistent gespeichert; das Passwort liegt ausschließlich als PBKDF2-SHA256-Hash in SQLite.
+`TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Die erste Anmeldung erfolgt mit `admin` und dem Initialpasswort `wasserwerte`. Danach erzwingt das Dashboard ein individuelles Passwort mit mindestens zehn Zeichen. Der Benutzername `admin` kann beibehalten oder optional geändert werden. Die Zugangsdaten werden persistent gespeichert; das Passwort liegt ausschließlich als PBKDF2-SHA256-Hash in SQLite.
 
 ### Dashboard öffnen
 
@@ -104,6 +104,14 @@ Die öffentliche Seite verwendet folgende Bewertung:
 - Rot – **Schlecht**: Wert liegt außerhalb von Minimum oder Maximum.
 
 Beim Widget-Typ **Stufen** lauten die drei Zustände stattdessen **Langsam**, **Mittel** und **Schnell**. Ohne konfigurierte Grenzwerte bleibt die Anzeige neutral.
+
+Kritische oder schlechte freigegebene Messwerte werden zusätzlich in einer gut sichtbaren Warnbox unten auf der Startseite zusammengefasst. Damit kann beispielsweise ein niedriger pH-Tankfüllstand sofort auffallen. Pumpen-Datenpunkte mit dem Widget-Typ **Stufen** lösen diese Warnbox nicht aus.
+
+## Wetter-Widget
+
+Im Adminbereich kann unter **Wetter** eine fünfstellige deutsche Postleitzahl gespeichert werden. Das Dashboard ermittelt den zugehörigen Ort und zeigt unten mittig auf der öffentlichen Startseite aktuelle Temperatur, Wetterlage, Luftfeuchtigkeit und Wind an. Die Daten werden serverseitig zwischengespeichert und standardmäßig höchstens alle 15 Minuten neu abgerufen. Das Intervall kann mit `WEATHER_REFRESH_SECONDS` angepasst werden.
+
+Für die Ortsauflösung und Wetterdaten wird [Open-Meteo](https://open-meteo.com/) verwendet. Nichtkommerzielle Nutzung benötigt keinen API-Schlüssel. Der Docker-Container benötigt dafür ausgehenden Internetzugriff. Bei einem vorübergehenden API-Ausfall werden nach Möglichkeit die zuletzt bekannten Daten angezeigt; das übrige Dashboard bleibt funktionsfähig.
 
 ## E-Mail-Warnung bei niedrigem Wert
 
