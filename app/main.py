@@ -181,8 +181,18 @@ def weather_location() -> dict[str, Any] | None:
 
 
 async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
+    # Zippopotam is purpose-built for postal codes and avoids fuzzy city-name matching.
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"https://api.zippopotam.us/de/{postal_code}")
+            if response.status_code == 200:
+                payload = response.json()
+                places = payload.get("places", [])
+                if places:
+                    place = places[0]
+                    return {"postal_code": postal_code, "latitude": float(place["latitude"]),
+                            "longitude": float(place["longitude"]), "city": place["place name"]}
+            # OpenStreetMap remains the fallback for postal codes absent from Zippopotam.
             response = await client.get("https://nominatim.openstreetmap.org/search", params={
                 "postalcode": postal_code, "country": "Deutschland", "format": "jsonv2",
                 "limit": 1, "addressdetails": 1,
