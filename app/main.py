@@ -42,6 +42,7 @@ COMMANDS = {
     "backwash": os.getenv("BACKWASH_COMMAND", ""),
 }
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
+poll_lock = asyncio.Lock()
 
 
 class DatapointUpdate(BaseModel):
@@ -52,12 +53,12 @@ class DatapointUpdate(BaseModel):
     logging: bool = True
     chart: bool = False
     widget_type: str = Field(default="value", pattern="^(value|gauge|status|text|levels)$")
-    scale: float = Field(default=1.0, ge=-1000000, le=1000000)
+    scale: float = Field(default=1.0, ge=-1000000, le=1000000, allow_inf_nan=False)
     decimals: int = Field(default=2, ge=0, le=8)
-    min_value: float | None = None
-    max_value: float | None = None
-    warning_low: float | None = None
-    warning_high: float | None = None
+    min_value: float | None = Field(default=None, allow_inf_nan=False)
+    max_value: float | None = Field(default=None, allow_inf_nan=False)
+    warning_low: float | None = Field(default=None, allow_inf_nan=False)
+    warning_high: float | None = Field(default=None, allow_inf_nan=False)
     alert_low: bool = False
 
 
@@ -206,9 +207,9 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
     return item
 
 
-def ingest(payload: dict[str, Any], now: int) -> list[tuple[str, float, str]]:
+def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str]]:
     flat = flatten(payload)
-    alerts: list[tuple[str, float, str]] = []
+    alerts: list[tuple[int, str, float, str]] = []
     with db() as conn:
         for position, (path, value) in enumerate(flat.items()):
             data_type, text_value, num_value = value_parts(value)
@@ -229,8 +230,7 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[str, float, str]]:
                 conn.execute("UPDATE datapoints SET alert_active=1 WHERE id=?", (point["id"],))
                 if due:
                     scaled = num_value * point["scale"]
-                    alerts.append((point["name"], scaled, point["unit"]))
-                    conn.execute("UPDATE datapoints SET last_alert_at=? WHERE id=?", (now, point["id"]))
+                    alerts.append((point["id"], point["name"], scaled, point["unit"]))
             elif point["alert_active"]:
                 conn.execute("UPDATE datapoints SET alert_active=0 WHERE id=?", (point["id"],))
         conn.execute("INSERT INTO poll_events(ts,online,raw_json,error) VALUES(?,1,?,NULL)",
@@ -240,7 +240,7 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[str, float, str]]:
 
 def send_low_alert(name: str, value: float, unit: str) -> None:
     if not all((SMTP_HOST, SMTP_FROM, ALERT_EMAIL_TO)):
-        return
+        raise RuntimeError("SMTP_HOST, SMTP_FROM oder ALERT_EMAIL_TO fehlt")
     rendered = f"{value:g}{(' ' + unit) if unit else ''}"
     message = EmailMessage()
     message["Subject"] = f"Oxilife-Warnung: {name} niedrig"
@@ -254,7 +254,7 @@ def send_low_alert(name: str, value: float, unit: str) -> None:
         client.send_message(message)
 
 
-async def poll_once() -> None:
+async def _poll_once() -> None:
     now = int(time.time())
     if not TASMOTA_BASE_URL:
         latest.update(online=False, updated_at=now, error="TASMOTA_BASE_URL fehlt")
@@ -268,9 +268,11 @@ async def poll_once() -> None:
             raise ValueError("Tasmota-Antwort ist kein JSON-Objekt")
         alerts = ingest(payload, now)
         alert_error = None
-        for name, value, unit in alerts:
+        for point_id, name, value, unit in alerts:
             try:
                 await asyncio.to_thread(send_low_alert, name, value, unit)
+                with db() as conn:
+                    conn.execute("UPDATE datapoints SET last_alert_at=? WHERE id=?", (now, point_id))
             except Exception as alert_exc:
                 alert_error = f"E-Mail-Warnung fehlgeschlagen: {alert_exc}"
         latest.update(online=True, updated_at=now, raw=payload, error=alert_error)
@@ -279,6 +281,11 @@ async def poll_once() -> None:
         latest.update(online=False, updated_at=now, error=message)
         with db() as conn:
             conn.execute("INSERT INTO poll_events(ts,online,raw_json,error) VALUES(?,0,'{}',?)", (now, message))
+
+
+async def poll_once() -> None:
+    async with poll_lock:
+        await _poll_once()
 
 
 async def poller() -> None:
@@ -341,6 +348,14 @@ def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request)
     values = settings.model_dump()
     if values["min_value"] is not None and values["max_value"] is not None and values["min_value"] > values["max_value"]:
         raise HTTPException(status_code=400, detail="Minimum darf nicht größer als Maximum sein")
+    if values["warning_low"] is not None and values["warning_high"] is not None and values["warning_low"] > values["warning_high"]:
+        raise HTTPException(status_code=400, detail="Warn min darf nicht größer als Warn max sein")
+    if values["min_value"] is not None and values["warning_low"] is not None and values["warning_low"] < values["min_value"]:
+        raise HTTPException(status_code=400, detail="Warn min muss innerhalb von Minimum und Maximum liegen")
+    if values["max_value"] is not None and values["warning_high"] is not None and values["warning_high"] > values["max_value"]:
+        raise HTTPException(status_code=400, detail="Warn max muss innerhalb von Minimum und Maximum liegen")
+    if values["alert_low"] and values["warning_low"] is None:
+        raise HTTPException(status_code=400, detail="Für die E-Mail-Warnung muss Warn min gesetzt sein")
     fields = list(values)
     with db() as conn:
         cursor = conn.execute(f"UPDATE datapoints SET {','.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?",

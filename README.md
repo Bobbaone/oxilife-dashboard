@@ -1,4 +1,4 @@
-#Oxilife Dashboard
+# Oxilife Dashboard
 
 Das Dashboard erkennt sämtliche Werte einer beliebig verschachtelten Tasmota-JSON-Antwort automatisch. Jeder Datenpunkt wird in SQLite registriert und kann im Adminbereich individuell konfiguriert werden.
 
