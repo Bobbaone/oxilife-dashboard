@@ -54,7 +54,7 @@ docker run -d \
   ghcr.io/bobbaone/oxilife-dashboard:latest
 ```
 
-`TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Bei der ersten Anmeldung lautet das Passwort in diesem Beispiel `wasserwerte`. Das Dashboard erzwingt anschließend die Vergabe eines individuellen Passworts mit mindestens zehn Zeichen. Dieses wird gehasht in der persistenten SQLite-Datenbank gespeichert.
+`TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Die erste Anmeldung erfolgt mit `admin` und dem Initialpasswort `wasserwerte`. Danach erzwingt das Dashboard die Erstellung eines eigenen Benutzernamens und eines individuellen Passworts mit mindestens zehn Zeichen. Die neuen Zugangsdaten werden persistent gespeichert; das Passwort liegt ausschließlich als PBKDF2-SHA256-Hash in SQLite.
 
 ### Dashboard öffnen
 
@@ -94,8 +94,6 @@ Danach den oben gezeigten `docker run`-Befehl erneut ausführen. Die Einstellung
 Objekte werden mit Punktpfaden und Arrays mit Indexpfaden erfasst, zum Beispiel `StatusSNS.DS18B20.Temperature` oder `sensors[0].value`. Neue Pfade erscheinen automatisch im Adminbereich. Dort lassen sich Name, Einheit, öffentliche Sichtbarkeit, Reihenfolge, Logging, Diagramm, Widget-Typ, Skalierung, Nachkommastellen sowie Anzeige- und Warngrenzen einstellen.
 
 Nur explizit freigegebene Datenpunkte erscheinen auf der öffentlichen Startseite. Die Historie beginnt für einen Datenpunkt, solange **Logging** aktiv ist. Deaktivieren stoppt neue Einträge, löscht aber keine vorhandenen Daten.
-
-Datenpunkte können im Adminbereich auch manuell angelegt werden, bevor Tasmota erreichbar ist. Numerische Datenpunkte beginnen mit dem Wert `0`. Wenn später ein JSON-Blatt mit demselben Pfad empfangen wird, übernimmt das Dashboard automatisch den echten Wert.
 
 ## Ampelfarben und Grenzwerte
 

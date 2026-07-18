@@ -62,14 +62,8 @@ class DatapointUpdate(BaseModel):
 
 
 class PasswordChange(BaseModel):
+    username: str = Field(min_length=3, max_length=80, pattern=r"^[^\s]+$")
     password: str = Field(min_length=10, max_length=200)
-
-
-class DatapointCreate(BaseModel):
-    path: str = Field(min_length=1, max_length=500, pattern=r"^[^\s]+$")
-    name: str = Field(min_length=1, max_length=200)
-    unit: str = Field(default="", max_length=40)
-    data_type: str = Field(default="number", pattern="^(number|text|boolean)$")
 
 
 def db() -> sqlite3.Connection:
@@ -138,6 +132,7 @@ def init_db() -> None:
         if "last_alert_at" not in columns:
             conn.execute("ALTER TABLE datapoints ADD COLUMN last_alert_at INTEGER")
         initial_hash = hash_password(ADMIN_PASSWORD)
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_username',?)", (ADMIN_USER,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
 
@@ -340,24 +335,6 @@ def datapoints(request: Request):
     return [point_dict(row) for row in rows]
 
 
-@app.post("/api/admin/datapoints", status_code=201)
-def create_datapoint(item: DatapointCreate, request: Request):
-    require_admin(request)
-    now = int(time.time())
-    initial_text = "0" if item.data_type in ("number", "boolean") else ""
-    initial_num = 0.0 if item.data_type in ("number", "boolean") else None
-    try:
-        with db() as conn:
-            cursor = conn.execute("""INSERT INTO datapoints
-                (path,name,data_type,unit,last_value_text,last_value_num,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?)""",
-                (item.path, item.name, item.data_type, item.unit, initial_text, initial_num, now, now))
-            row = conn.execute("SELECT * FROM datapoints WHERE id=?", (cursor.lastrowid,)).fetchone()
-    except sqlite3.IntegrityError as exc:
-        raise HTTPException(status_code=409, detail="Dieser JSON-Pfad ist bereits registriert") from exc
-    return point_dict(row)
-
-
 @app.put("/api/admin/datapoints/{point_id}")
 def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request):
     require_admin(request)
@@ -434,9 +411,10 @@ async def poll_now(request: Request):
 async def login(request: Request):
     body = await request.json()
     with db() as conn:
+        admin_username = setting(conn, "admin_username", ADMIN_USER)
         password_hash = setting(conn, "admin_password_hash")
         change_required = setting(conn, "password_change_required", "1") == "1"
-    if body.get("username") == ADMIN_USER and verify_password(str(body.get("password", "")), password_hash):
+    if body.get("username") == admin_username and verify_password(str(body.get("password", "")), password_hash):
         request.session["admin"] = True
         request.session["password_change_required"] = change_required
         return {"ok": True, "password_change_required": change_required}
@@ -450,6 +428,8 @@ def change_password(body: PasswordChange, request: Request):
     if body.password.lower() == "wasserwerte" or body.password == ADMIN_PASSWORD:
         raise HTTPException(status_code=400, detail="Bitte ein neues, individuelles Passwort wählen")
     with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('admin_username',?)",
+                     (body.username,))
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('admin_password_hash',?)",
                      (hash_password(body.password),))
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('password_change_required','0')")
