@@ -18,4 +18,8 @@ services:
       FILTER_SPEED_COMMAND_3: /cm?cmnd=Backlog%20Var1%203
       BACKWASH_COMMAND: /cm?cmnd=Backlog%20Var2%201
     volumes:
-      - ./data:/app/data
+      - oxilife-data:/app/data
+
+volumes:
+  oxilife-data:
+    name: oxilife-dashboard-data
