@@ -1,11 +1,17 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
+import secrets
+import smtplib
 import sqlite3
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from email.message import EmailMessage
 from typing import Any
 
 import httpx
@@ -20,8 +26,15 @@ TASMOTA_BASE_URL = os.getenv("TASMOTA_BASE_URL", "").rstrip("/")
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "bitte-aendern")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "wasserwerte")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "change-me")
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")))
 COMMANDS = {
     "1": os.getenv("FILTER_SPEED_COMMAND_1", ""),
     "2": os.getenv("FILTER_SPEED_COMMAND_2", ""),
@@ -38,13 +51,25 @@ class DatapointUpdate(BaseModel):
     sort_order: int = Field(default=0, ge=-100000, le=100000)
     logging: bool = True
     chart: bool = False
-    widget_type: str = Field(default="value", pattern="^(value|gauge|status|text)$")
+    widget_type: str = Field(default="value", pattern="^(value|gauge|status|text|levels)$")
     scale: float = Field(default=1.0, ge=-1000000, le=1000000)
     decimals: int = Field(default=2, ge=0, le=8)
     min_value: float | None = None
     max_value: float | None = None
     warning_low: float | None = None
     warning_high: float | None = None
+    alert_low: bool = False
+
+
+class PasswordChange(BaseModel):
+    password: str = Field(min_length=10, max_length=200)
+
+
+class DatapointCreate(BaseModel):
+    path: str = Field(min_length=1, max_length=500, pattern=r"^[^\s]+$")
+    name: str = Field(min_length=1, max_length=200)
+    unit: str = Field(default="", max_length=40)
+    data_type: str = Field(default="number", pattern="^(number|text|boolean)$")
 
 
 def db() -> sqlite3.Connection:
@@ -100,7 +125,45 @@ def init_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_readings_point_ts ON readings(datapoint_id, ts);
             CREATE INDEX IF NOT EXISTS idx_poll_events_ts ON poll_events(ts);
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(datapoints)")}
+        if "alert_low" not in columns:
+            conn.execute("ALTER TABLE datapoints ADD COLUMN alert_low INTEGER NOT NULL DEFAULT 0")
+        if "alert_active" not in columns:
+            conn.execute("ALTER TABLE datapoints ADD COLUMN alert_active INTEGER NOT NULL DEFAULT 0")
+        if "last_alert_at" not in columns:
+            conn.execute("ALTER TABLE datapoints ADD COLUMN last_alert_at INTEGER")
+        initial_hash = hash_password(ADMIN_PASSWORD)
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
+    return f"pbkdf2_sha256$310000${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations, salt_text, digest_text = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        salt = base64.b64decode(salt_text)
+        expected = base64.b64decode(digest_text)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iterations))
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
 
 
 def flatten(data: Any, prefix: str = "") -> dict[str, Any]:
@@ -140,6 +203,7 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
         "chart": bool(row["chart"]), "widget_type": row["widget_type"], "scale": row["scale"],
         "decimals": row["decimals"], "min_value": row["min_value"], "max_value": row["max_value"],
         "warning_low": row["warning_low"], "warning_high": row["warning_high"],
+        "alert_low": bool(row["alert_low"]),
         "value": value, "raw_value": row["last_value_text"], "last_seen": row["last_seen"],
     }
     if include_path:
@@ -147,8 +211,9 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
     return item
 
 
-def ingest(payload: dict[str, Any], now: int) -> None:
+def ingest(payload: dict[str, Any], now: int) -> list[tuple[str, float, str]]:
     flat = flatten(payload)
+    alerts: list[tuple[str, float, str]] = []
     with db() as conn:
         for position, (path, value) in enumerate(flat.items()):
             data_type, text_value, num_value = value_parts(value)
@@ -158,12 +223,40 @@ def ingest(payload: dict[str, Any], now: int) -> None:
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
                 last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at""",
                 (path, display_name(path), data_type, position, text_value, num_value, now, now, now))
-            point = conn.execute("SELECT id, logging FROM datapoints WHERE path=?", (path,)).fetchone()
+            point = conn.execute("SELECT * FROM datapoints WHERE path=?", (path,)).fetchone()
             if point["logging"]:
                 conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
                              (point["id"], now, text_value, num_value))
+            low = (point["alert_low"] and num_value is not None and point["warning_low"] is not None
+                   and num_value * point["scale"] < point["warning_low"])
+            if low:
+                due = not point["alert_active"] or not point["last_alert_at"] or now - point["last_alert_at"] >= ALERT_COOLDOWN_SECONDS
+                conn.execute("UPDATE datapoints SET alert_active=1 WHERE id=?", (point["id"],))
+                if due:
+                    scaled = num_value * point["scale"]
+                    alerts.append((point["name"], scaled, point["unit"]))
+                    conn.execute("UPDATE datapoints SET last_alert_at=? WHERE id=?", (now, point["id"]))
+            elif point["alert_active"]:
+                conn.execute("UPDATE datapoints SET alert_active=0 WHERE id=?", (point["id"],))
         conn.execute("INSERT INTO poll_events(ts,online,raw_json,error) VALUES(?,1,?,NULL)",
                      (now, json.dumps(payload, ensure_ascii=False)))
+    return alerts
+
+
+def send_low_alert(name: str, value: float, unit: str) -> None:
+    if not all((SMTP_HOST, SMTP_FROM, ALERT_EMAIL_TO)):
+        return
+    rendered = f"{value:g}{(' ' + unit) if unit else ''}"
+    message = EmailMessage()
+    message["Subject"] = f"Oxilife-Warnung: {name} niedrig"
+    message["From"] = SMTP_FROM
+    message["To"] = ALERT_EMAIL_TO
+    message.set_content(f"Achtung. Füllstand {name} {rendered} niedrig.")
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as client:
+        client.starttls()
+        if SMTP_USER:
+            client.login(SMTP_USER, SMTP_PASSWORD)
+        client.send_message(message)
 
 
 async def poll_once() -> None:
@@ -178,8 +271,14 @@ async def poll_once() -> None:
             payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Tasmota-Antwort ist kein JSON-Objekt")
-        ingest(payload, now)
-        latest.update(online=True, updated_at=now, raw=payload, error=None)
+        alerts = ingest(payload, now)
+        alert_error = None
+        for name, value, unit in alerts:
+            try:
+                await asyncio.to_thread(send_low_alert, name, value, unit)
+            except Exception as alert_exc:
+                alert_error = f"E-Mail-Warnung fehlgeschlagen: {alert_exc}"
+        latest.update(online=True, updated_at=now, raw=payload, error=alert_error)
     except Exception as exc:
         message = str(exc)
         latest.update(online=False, updated_at=now, error=message)
@@ -212,6 +311,8 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax"
 def require_admin(request: Request) -> None:
     if not request.session.get("admin"):
         raise HTTPException(status_code=401, detail="Nicht angemeldet")
+    if request.session.get("password_change_required"):
+        raise HTTPException(status_code=403, detail="Passwortänderung erforderlich")
 
 
 @app.get("/")
@@ -237,6 +338,24 @@ def datapoints(request: Request):
     with db() as conn:
         rows = conn.execute("SELECT * FROM datapoints ORDER BY sort_order,name").fetchall()
     return [point_dict(row) for row in rows]
+
+
+@app.post("/api/admin/datapoints", status_code=201)
+def create_datapoint(item: DatapointCreate, request: Request):
+    require_admin(request)
+    now = int(time.time())
+    initial_text = "0" if item.data_type in ("number", "boolean") else ""
+    initial_num = 0.0 if item.data_type in ("number", "boolean") else None
+    try:
+        with db() as conn:
+            cursor = conn.execute("""INSERT INTO datapoints
+                (path,name,data_type,unit,last_value_text,last_value_num,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (item.path, item.name, item.data_type, item.unit, initial_text, initial_num, now, now))
+            row = conn.execute("SELECT * FROM datapoints WHERE id=?", (cursor.lastrowid,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Dieser JSON-Pfad ist bereits registriert") from exc
+    return point_dict(row)
 
 
 @app.put("/api/admin/datapoints/{point_id}")
@@ -314,10 +433,28 @@ async def poll_now(request: Request):
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
-    if body.get("username") == ADMIN_USER and body.get("password") == ADMIN_PASSWORD:
+    with db() as conn:
+        password_hash = setting(conn, "admin_password_hash")
+        change_required = setting(conn, "password_change_required", "1") == "1"
+    if body.get("username") == ADMIN_USER and verify_password(str(body.get("password", "")), password_hash):
         request.session["admin"] = True
-        return {"ok": True}
+        request.session["password_change_required"] = change_required
+        return {"ok": True, "password_change_required": change_required}
     raise HTTPException(status_code=401, detail="Falsche Zugangsdaten")
+
+
+@app.post("/api/change-password")
+def change_password(body: PasswordChange, request: Request):
+    if not request.session.get("admin"):
+        raise HTTPException(status_code=401, detail="Nicht angemeldet")
+    if body.password.lower() == "wasserwerte" or body.password == ADMIN_PASSWORD:
+        raise HTTPException(status_code=400, detail="Bitte ein neues, individuelles Passwort wählen")
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('admin_password_hash',?)",
+                     (hash_password(body.password),))
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('password_change_required','0')")
+    request.session["password_change_required"] = False
+    return {"ok": True}
 
 
 @app.post("/api/logout")
@@ -327,7 +464,9 @@ def logout(request: Request):
 
 
 @app.get("/api/session")
-def session(request: Request): return {"admin": bool(request.session.get("admin"))}
+def session(request: Request):
+    return {"admin": bool(request.session.get("admin")),
+            "password_change_required": bool(request.session.get("password_change_required"))}
 
 
 async def send_command(path: str) -> Any:

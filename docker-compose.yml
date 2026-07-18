@@ -11,8 +11,15 @@ services:
       TASMOTA_STATUS_PATH: /cm?cmnd=Status%2010
       POLL_SECONDS: 10
       ADMIN_USER: admin
-      ADMIN_PASSWORD: bitte-aendern
+      ADMIN_PASSWORD: wasserwerte
       SESSION_SECRET: bitte-unbedingt-aendern
+      # SMTP_HOST: smtp.example.com
+      # SMTP_PORT: 587
+      # SMTP_USER: dashboard@example.com
+      # SMTP_PASSWORD: bitte-aendern
+      # SMTP_FROM: dashboard@example.com
+      # ALERT_EMAIL_TO: empfaenger@example.com
+      # ALERT_COOLDOWN_SECONDS: 3600
       FILTER_SPEED_COMMAND_1: /cm?cmnd=Backlog%20Var1%201
       FILTER_SPEED_COMMAND_2: /cm?cmnd=Backlog%20Var1%202
       FILTER_SPEED_COMMAND_3: /cm?cmnd=Backlog%20Var1%203

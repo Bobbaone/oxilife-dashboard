@@ -16,7 +16,7 @@ cd oxilife-dashboard
 Danach in `docker-compose.yml` mindestens diese Werte anpassen:
 
 - `TASMOTA_BASE_URL`: Adresse des Tasmota-Geräts, zum Beispiel `http://192.168.1.50`
-- `ADMIN_PASSWORD`: eigenes, sicheres Admin-Passwort
+- `ADMIN_PASSWORD`: automatisch vergebenes Passwort für die erste Anmeldung (Standard: `wasserwerte`)
 - `SESSION_SECRET`: lange, zufällige Zeichenfolge
 - bei Bedarf `TASMOTA_STATUS_PATH`, Abfrageintervall und Steuerbefehle
 
@@ -49,12 +49,12 @@ docker run -d \
   -e 'TASMOTA_STATUS_PATH=/cm?cmnd=Status%2010' \
   -e POLL_SECONDS=10 \
   -e ADMIN_USER=admin \
-  -e ADMIN_PASSWORD=EIN-SICHERES-PASSWORT \
+  -e ADMIN_PASSWORD=wasserwerte \
   -e SESSION_SECRET=EINE-LANGE-ZUFAELLIGE-ZEICHENFOLGE \
   ghcr.io/bobbaone/oxilife-dashboard:latest
 ```
 
-`TASMOTA_BASE_URL`, `ADMIN_PASSWORD` und `SESSION_SECRET` müssen vor dem Start angepasst werden.
+`TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Bei der ersten Anmeldung lautet das Passwort in diesem Beispiel `wasserwerte`. Das Dashboard erzwingt anschließend die Vergabe eines individuellen Passworts mit mindestens zehn Zeichen. Dieses wird gehasht in der persistenten SQLite-Datenbank gespeichert.
 
 ### Dashboard öffnen
 
@@ -94,6 +94,40 @@ Danach den oben gezeigten `docker run`-Befehl erneut ausführen. Die Einstellung
 Objekte werden mit Punktpfaden und Arrays mit Indexpfaden erfasst, zum Beispiel `StatusSNS.DS18B20.Temperature` oder `sensors[0].value`. Neue Pfade erscheinen automatisch im Adminbereich. Dort lassen sich Name, Einheit, öffentliche Sichtbarkeit, Reihenfolge, Logging, Diagramm, Widget-Typ, Skalierung, Nachkommastellen sowie Anzeige- und Warngrenzen einstellen.
 
 Nur explizit freigegebene Datenpunkte erscheinen auf der öffentlichen Startseite. Die Historie beginnt für einen Datenpunkt, solange **Logging** aktiv ist. Deaktivieren stoppt neue Einträge, löscht aber keine vorhandenen Daten.
+
+Datenpunkte können im Adminbereich auch manuell angelegt werden, bevor Tasmota erreichbar ist. Numerische Datenpunkte beginnen mit dem Wert `0`. Wenn später ein JSON-Blatt mit demselben Pfad empfangen wird, übernimmt das Dashboard automatisch den echten Wert.
+
+## Ampelfarben und Grenzwerte
+
+Die öffentliche Seite verwendet folgende Bewertung:
+
+- Grün – **Perfekt**: Wert liegt innerhalb der konfigurierten Warngrenzen.
+- Gelb – **Kritisch**: Wert liegt außerhalb von `Warn min` oder `Warn max`, aber noch innerhalb von Minimum und Maximum.
+- Rot – **Schlecht**: Wert liegt außerhalb von Minimum oder Maximum.
+
+Beim Widget-Typ **Stufen** lauten die drei Zustände stattdessen **Langsam**, **Mittel** und **Schnell**. Ohne konfigurierte Grenzwerte bleibt die Anzeige neutral.
+
+## E-Mail-Warnung bei niedrigem Wert
+
+Für jeden numerischen Datenpunkt kann im Adminbereich **E-Mail niedrig** aktiviert werden. Fällt der skalierte Messwert unter `Warn min`, sendet das Dashboard beispielsweise:
+
+```text
+Achtung. Füllstand pH-Wert 6.4 niedrig.
+```
+
+SMTP und Empfänger werden über Docker-Umgebungsvariablen konfiguriert:
+
+```yaml
+SMTP_HOST: smtp.example.com
+SMTP_PORT: 587
+SMTP_USER: dashboard@example.com
+SMTP_PASSWORD: eigenes-smtp-passwort
+SMTP_FROM: dashboard@example.com
+ALERT_EMAIL_TO: empfaenger@example.com
+ALERT_COOLDOWN_SECONDS: 3600
+```
+
+Das Dashboard nutzt STARTTLS. Pro Datenpunkt wird während eines anhaltenden Niedrigstands höchstens eine Nachricht innerhalb der Sperrzeit versendet. Sobald sich der Wert erholt und später erneut absinkt, wird wieder gewarnt.
 
 ## Anlagensteuerung
 
