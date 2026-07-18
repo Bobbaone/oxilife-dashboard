@@ -342,6 +342,16 @@ def datapoints(request: Request):
     return [point_dict(row) for row in rows]
 
 
+@app.get("/api/admin/alert-config")
+def alert_config(request: Request):
+    require_admin(request)
+    return {
+        "configured": bool(SMTP_HOST and SMTP_FROM and ALERT_EMAIL_TO),
+        "recipient": ALERT_EMAIL_TO,
+        "cooldown_seconds": ALERT_COOLDOWN_SECONDS,
+    }
+
+
 @app.put("/api/admin/datapoints/{point_id}")
 def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request):
     require_admin(request)

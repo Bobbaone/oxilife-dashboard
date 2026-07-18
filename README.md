@@ -135,6 +135,18 @@ Die vorhandenen Filterstufen- und Rückspülfunktionen bleiben erhalten. Die vor
 
 SQLite liegt unter `/app/data/oxilife.db`. Docker Compose bindet dafür das benannte Volume `oxilife-dashboard-data` ein. Ein bestehendes bind-mount-basiertes `./data/oxilife.db` wird nicht automatisch in das neue Volume kopiert; bei einem Upgrade die Datei einmalig übernehmen oder den bisherigen Mount beibehalten.
 
+Das benannte Volume bleibt erhalten, wenn der Container oder der lokale Projektordner gelöscht und das Repository neu geklont wird. Dadurch bleiben Datenpunkte, Historie, Einstellungen und Adminzugang bei Updates erhalten.
+
+Für einen vollständigen Neustart mit leerer Datenbank müssen Container und Volume ausdrücklich gelöscht werden:
+
+```bash
+docker compose down -v
+docker volume rm oxilife-dashboard-data 2>/dev/null || true
+docker compose up -d --build
+```
+
+**Achtung:** Dabei werden sämtliche Messwerte, Einstellungen und selbst vergebenen Adminzugangsdaten unwiderruflich gelöscht. Die Ersteinrichtung beginnt anschließend wieder mit `admin` / `wasserwerte`.
+
 ## Container-Image
 
 Pushes auf `main` und manuell gestartete Workflows bauen ein Multi-Arch-Image und veröffentlichen es als `ghcr.io/bobbaone/oxilife-dashboard:latest`. Für Pull Requests wird nur gebaut, nicht veröffentlicht.
