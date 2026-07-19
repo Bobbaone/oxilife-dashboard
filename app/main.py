@@ -29,6 +29,7 @@ TASMOTA_BASE_URL = os.getenv("TASMOTA_BASE_URL", "").rstrip("/")
 TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "AtomV5").strip() or "Tasmota"
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
+FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "wasserwerte")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "change-me")
@@ -52,6 +53,7 @@ latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error
 poll_lock = asyncio.Lock()
 weather_lock = asyncio.Lock()
 weather_cache: dict[str, Any] = {"fetched_at": 0, "data": None, "error": None}
+filter_timer_cache: dict[str, Any] = {"fetched_at": 0, "values": {}}
 last_report_week: tuple[int, int] | None = None
 
 
@@ -79,6 +81,12 @@ class PasswordChange(BaseModel):
 
 class WeatherUpdate(BaseModel):
     postal_code: str = Field(pattern=r"^\d{5}$")
+
+
+class FilterTimerUpdate(BaseModel):
+    enabled: bool = True
+    start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 class ConnectionUpdate(BaseModel):
@@ -409,6 +417,9 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
     }
     name = names.get(key, words or path)
     path_key = path.lower()
+    timer_match = re.search(r"neopool\.filtration\.timer(\d+)$", path_key)
+    if timer_match:
+        name = f"Filterzeit {timer_match.group(1)}"
     neopool_names = {
         "neopool.type": "Anlagentyp",
         "neopool.ph.data": "pH-Wert",
@@ -729,10 +740,11 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
                     ".hydrolysis.data", ".hydrolysis.setpoint", ".hydrolysis.max")):
                 defaults["unit"] = hydrolysis_unit
             limits = datapoint_quality_defaults(path) or {}
+            auto_visible = int(datapoint_semantic(path) == "filtration_time")
             conn.execute("""INSERT INTO datapoints
-                (path,name,data_type,unit,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
+                (path,name,data_type,unit,visible,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
                  alert_low,auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
                 last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
                 name=CASE WHEN datapoints.auto_configured=1 THEN excluded.name ELSE datapoints.name END,
@@ -745,7 +757,7 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
                 warning_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_low ELSE datapoints.warning_low END,
                 warning_high=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_high ELSE datapoints.warning_high END,
                 alert_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.alert_low ELSE datapoints.alert_low END""",
-                (path, defaults["name"], data_type, defaults["unit"], position, defaults["widget_type"],
+                (path, defaults["name"], data_type, defaults["unit"], auto_visible, position, defaults["widget_type"],
                  defaults["scale"], defaults["decimals"], limits.get("min_value"), limits.get("max_value"),
                  limits.get("warning_low"), limits.get("warning_high"), int(limits.get("alert_low", False)),
                  text_value, num_value, now, now, now))
@@ -796,6 +808,7 @@ async def _poll_once() -> None:
             response = await client.get(TASMOTA_BASE_URL + STATUS_PATH)
             response.raise_for_status()
             payload = response.json()
+            await add_filter_timers(client, payload, now)
         if not isinstance(payload, dict):
             raise ValueError("Tasmota-Antwort ist kein JSON-Objekt")
         alerts = ingest(payload, now)
@@ -813,6 +826,36 @@ async def _poll_once() -> None:
         latest.update(online=False, updated_at=now, error=message)
         with db() as conn:
             conn.execute("INSERT INTO poll_events(ts,online,raw_json,error) VALUES(?,0,'{}',?)", (now, message))
+
+
+def timer_clock(seconds: int) -> str:
+    seconds %= 86400
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+
+
+async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], now: int) -> None:
+    """Read NeoPool filtration timers, which are not part of the regular SENSOR JSON."""
+    if now - int(filter_timer_cache["fetched_at"]) >= FILTER_TIMER_POLL_SECONDS:
+        values: dict[str, str] = {}
+        try:
+            for number, base in enumerate((0x0434, 0x0443, 0x0452), 1):
+                enabled_response = await client.get(TASMOTA_BASE_URL + f"/cm?cmnd=NPRead%200x{base:X}")
+                data_response = await client.get(TASMOTA_BASE_URL + f"/cm?cmnd=NPReadL%200x{base + 1:X}%2C7")
+                enabled_response.raise_for_status()
+                data_response.raise_for_status()
+                enabled = int(enabled_response.json().get("NPRead", {}).get("Data", 0))
+                data = data_response.json().get("NPReadL", {}).get("Data", [])
+                if enabled in (1, 2) and isinstance(data, list) and len(data) >= 4:
+                    start, duration = int(data[0]), int(data[3])
+                    values[f"Timer{number}"] = f"{timer_clock(start)}–{timer_clock(start + duration)}"
+            filter_timer_cache.update(fetched_at=now, values=values)
+        except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
+            filter_timer_cache["fetched_at"] = now
+    pool = neopool_payload(payload)
+    if pool is not None and filter_timer_cache["values"]:
+        filtration = pool.setdefault("Filtration", {})
+        if isinstance(filtration, dict):
+            filtration.update(filter_timer_cache["values"])
 
 
 async def poll_once() -> None:
@@ -890,6 +933,10 @@ def admin(): return FileResponse(BASE / "static" / "admin.html")
 
 @app.get("/statistics")
 def statistics_page(): return FileResponse(BASE / "static" / "statistics.html")
+
+
+@app.get("/pump")
+def pump_page(): return FileResponse(BASE / "static" / "pump.html")
 
 
 @app.get("/api/status")
@@ -1186,6 +1233,59 @@ async def filter_speed(speed: str, request: Request):
         f"Tasmota hat den Befehl erhalten, aber Oxilife meldet weiterhin Pumpenstufe {actual}. "
         "Die laufende Filtersteuerung hat den Befehl nicht übernommen."
     ))
+
+
+@app.post("/api/filter-mode/{mode}")
+async def filter_mode(mode: int, request: Request):
+    require_admin(request)
+    if mode not in (0, 1, 2, 3, 4):
+        raise HTTPException(status_code=400, detail="Ungültige Betriebsart")
+    result = await send_command(f"/cm?cmnd=NPFiltrationmode%20{mode}")
+    await asyncio.sleep(1)
+    await poll_once()
+    filtration = (neopool_payload(latest.get("raw")) or {}).get("Filtration", {})
+    actual = filtration.get("Mode") if isinstance(filtration, dict) else None
+    if str(actual) != str(mode):
+        raise HTTPException(status_code=409, detail=f"Oxilife meldet weiterhin Betriebsart {actual}.")
+    return {"ok": True, "mode": mode, "verified": True, "result": result}
+
+
+@app.get("/api/admin/filter-timers")
+def filter_timers(request: Request):
+    require_admin(request)
+    return {"timers": filter_timer_cache["values"], "updated_at": filter_timer_cache["fetched_at"]}
+
+
+def clock_seconds(value: str) -> int:
+    hours, minutes = (int(part) for part in value.split(":"))
+    return hours * 3600 + minutes * 60
+
+
+@app.put("/api/admin/filter-timers/{number}")
+async def update_filter_timer(number: int, update: FilterTimerUpdate, request: Request):
+    require_admin(request)
+    if number not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="Ungültige Filterzeit")
+    base = (0x0434, 0x0443, 0x0452)[number - 1]
+    if update.enabled:
+        start = clock_seconds(update.start)
+        end = clock_seconds(update.end)
+        duration = (end - start) % 86400
+        if duration == 0:
+            raise HTTPException(status_code=400, detail="Start und Ende dürfen nicht identisch sein.")
+        await send_command(f"/cm?cmnd=NPWriteL%200x{base + 1:X}%2C{start}%200%2086400%20{duration}")
+        await send_command(f"/cm?cmnd=NPWrite%200x{base:X}%2C1")
+    else:
+        await send_command(f"/cm?cmnd=NPWrite%200x{base:X}%2C0")
+    await send_command("/cm?cmnd=NPExec")
+    await send_command("/cm?cmnd=NPSave")
+    filter_timer_cache["fetched_at"] = 0
+    await poll_once()
+    expected = f"{update.start}–{update.end}" if update.enabled else None
+    actual = filter_timer_cache["values"].get(f"Timer{number}")
+    if actual != expected:
+        raise HTTPException(status_code=409, detail=f"Gespeichert, aber Rückmeldung ist {actual or 'Aus'} statt {expected or 'Aus'}.")
+    return {"ok": True, "number": number, "value": actual or "Aus", "verified": True}
 
 
 @app.post("/api/backwash")
