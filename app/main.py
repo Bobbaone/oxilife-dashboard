@@ -53,7 +53,7 @@ latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error
 poll_lock = asyncio.Lock()
 weather_lock = asyncio.Lock()
 weather_cache: dict[str, Any] = {"fetched_at": 0, "data": None, "error": None}
-filter_timer_cache: dict[str, Any] = {"fetched_at": 0, "values": {}}
+filter_timer_cache: dict[str, Any] = {"fetched_at": 0, "values": {}, "speeds": {}}
 last_report_week: tuple[int, int] | None = None
 
 
@@ -87,6 +87,7 @@ class FilterTimerUpdate(BaseModel):
     enabled: bool = True
     start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    speed: int = Field(default=1, ge=1, le=3)
 
 
 class ConnectionUpdate(BaseModel):
@@ -855,7 +856,13 @@ async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], 
     """Read NeoPool filtration timers, which are not part of the regular SENSOR JSON."""
     if now - int(filter_timer_cache["fetched_at"]) >= FILTER_TIMER_POLL_SECONDS:
         values: dict[str, str] = {}
+        speeds: dict[str, int] = {}
         try:
+            speed_response = await client.get(TASMOTA_BASE_URL + "/cm?cmnd=NPRead%200x50F")
+            speed_response.raise_for_status()
+            filtration_config = register_int(speed_response.json().get("NPRead", {}).get("Data", 0))
+            for number, shift in enumerate((7, 10, 13), 1):
+                speeds[f"Timer{number}"] = ((filtration_config >> shift) & 0x7) + 1
             for number, base in enumerate((0x0434, 0x0443, 0x0452), 1):
                 enabled_response = await client.get(TASMOTA_BASE_URL + f"/cm?cmnd=NPRead%200x{base:X}")
                 data_response = await client.get(TASMOTA_BASE_URL + f"/cm?cmnd=NPReadL%200x{base + 1:X}%2C7")
@@ -867,14 +874,16 @@ async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], 
                     start, duration = register_int(data[0]), register_int(data[3])
                     if duration > 0:
                         values[f"Timer{number}"] = f"{timer_clock(start)}–{timer_clock(start + duration)}"
-            filter_timer_cache.update(fetched_at=now, values=values)
+            filter_timer_cache.update(fetched_at=now, values=values, speeds=speeds)
         except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
             filter_timer_cache["fetched_at"] = now
     pool = neopool_payload(payload)
     if pool is not None and filter_timer_cache["values"]:
         filtration = pool.setdefault("Filtration", {})
         if isinstance(filtration, dict):
-            filtration.update(filter_timer_cache["values"])
+            labels = {1: "Langsam", 2: "Mittel", 3: "Schnell"}
+            filtration.update({key: f"{value} · {labels.get(filter_timer_cache['speeds'].get(key), 'Unbekannt')}"
+                               for key, value in filter_timer_cache["values"].items()})
 
 
 async def poll_once() -> None:
@@ -1274,7 +1283,8 @@ async def filter_mode(mode: int, request: Request):
 @app.get("/api/admin/filter-timers")
 def filter_timers(request: Request):
     require_admin(request)
-    return {"timers": filter_timer_cache["values"], "updated_at": filter_timer_cache["fetched_at"]}
+    return {"timers": filter_timer_cache["values"], "speeds": filter_timer_cache["speeds"],
+            "updated_at": filter_timer_cache["fetched_at"]}
 
 
 def clock_seconds(value: str) -> int:
@@ -1298,20 +1308,29 @@ async def update_filter_timer(number: int, update: FilterTimerUpdate, request: R
         await send_command(f"/cm?cmnd=NPWrite%200x{base:X}%2C1")
     else:
         await send_command(f"/cm?cmnd=NPWrite%200x{base:X}%2C0")
+    config_result = await send_command("/cm?cmnd=NPRead%200x50F")
+    filtration_config = register_int(config_result.get("NPRead", {}).get("Data", 0))
+    shift = (7, 10, 13)[number - 1]
+    mask = (0x0380, 0x1C00, 0xE000)[number - 1]
+    filtration_config = (filtration_config & ~mask) | ((update.speed - 1) << shift)
+    await send_command(f"/cm?cmnd=NPWrite%200x50F%2C{filtration_config}")
     await send_command("/cm?cmnd=NPExec")
     await send_command("/cm?cmnd=NPSave")
     expected = f"{update.start}–{update.end}" if update.enabled else None
     actual = None
+    actual_speed = None
     for _ in range(5):
         await asyncio.sleep(1)
         filter_timer_cache["fetched_at"] = 0
         await poll_once()
         actual = filter_timer_cache["values"].get(f"Timer{number}")
-        if actual == expected:
+        actual_speed = filter_timer_cache["speeds"].get(f"Timer{number}")
+        if actual == expected and actual_speed == update.speed:
             break
-    if actual != expected:
-        raise HTTPException(status_code=409, detail=f"Gespeichert, aber Rückmeldung ist {actual or 'Aus'} statt {expected or 'Aus'}.")
-    return {"ok": True, "number": number, "value": actual or "Aus", "verified": True}
+    if actual != expected or actual_speed != update.speed:
+        raise HTTPException(status_code=409, detail=(f"Gespeichert, aber Rückmeldung ist {actual or 'Aus'} / "
+                            f"Stufe {actual_speed or 'unbekannt'}."))
+    return {"ok": True, "number": number, "value": actual or "Aus", "speed": actual_speed, "verified": True}
 
 
 @app.post("/api/backwash")
