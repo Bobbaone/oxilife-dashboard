@@ -23,6 +23,7 @@ from starlette.middleware.sessions import SessionMiddleware
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/oxilife.db"))
 TASMOTA_BASE_URL = os.getenv("TASMOTA_BASE_URL", "").rstrip("/")
+TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "AtomV5").strip() or "Tasmota"
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
@@ -73,6 +74,12 @@ class PasswordChange(BaseModel):
 
 class WeatherUpdate(BaseModel):
     postal_code: str = Field(pattern=r"^\d{5}$")
+
+
+class ConnectionUpdate(BaseModel):
+    tasmota_name: str = Field(min_length=1, max_length=80)
+    oxilife_datapoint_id: int | None = Field(default=None, ge=1)
+    oxilife_timeout_seconds: int = Field(default=30, ge=10, le=3600)
 
 
 def db() -> sqlite3.Connection:
@@ -179,6 +186,15 @@ def weather_location() -> dict[str, Any] | None:
     if not all((postal_code, latitude, longitude, city)):
         return None
     return {"postal_code": postal_code, "latitude": float(latitude), "longitude": float(longitude), "city": city}
+
+
+def connection_config(conn: sqlite3.Connection) -> dict[str, Any]:
+    point_id = setting(conn, "oxilife_datapoint_id")
+    return {
+        "tasmota_name": setting(conn, "tasmota_name", TASMOTA_DISPLAY_NAME),
+        "oxilife_datapoint_id": int(point_id) if point_id.isdigit() else None,
+        "oxilife_timeout_seconds": int(setting(conn, "oxilife_timeout_seconds", "30")),
+    }
 
 
 async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
@@ -425,8 +441,20 @@ def admin(): return FileResponse(BASE / "static" / "admin.html")
 def status():
     with db() as conn:
         rows = conn.execute("SELECT * FROM datapoints WHERE visible=1 ORDER BY sort_order,name").fetchall()
+        config = connection_config(conn)
+        heartbeat = (conn.execute("SELECT name,last_seen FROM datapoints WHERE id=?", (config["oxilife_datapoint_id"],)).fetchone()
+                     if config["oxilife_datapoint_id"] else None)
+    oxilife_configured = heartbeat is not None
+    oxilife_online = bool(latest["online"] and heartbeat and heartbeat["last_seen"]
+                           and int(time.time()) - heartbeat["last_seen"] <= config["oxilife_timeout_seconds"])
     return {"online": latest["online"], "updated_at": latest["updated_at"], "error": latest["error"],
             "server_time": datetime.now().astimezone().isoformat(),
+            "connections": {
+                "tasmota": {"name": config["tasmota_name"], "online": latest["online"]},
+                "oxilife": {"name": "Oxilife", "online": oxilife_online, "configured": oxilife_configured,
+                             "heartbeat_name": heartbeat["name"] if heartbeat else None,
+                             "last_seen": heartbeat["last_seen"] if heartbeat else None},
+            },
             "datapoints": [point_dict(row, include_path=False) for row in rows]}
 
 
@@ -457,6 +485,29 @@ def alert_config(request: Request):
 def admin_weather(request: Request):
     require_admin(request)
     return weather_location() or {"postal_code": "", "city": "", "enabled": False}
+
+
+@app.get("/api/admin/connection")
+def admin_connection(request: Request):
+    require_admin(request)
+    with db() as conn:
+        return connection_config(conn)
+
+
+@app.put("/api/admin/connection")
+def update_connection(body: ConnectionUpdate, request: Request):
+    require_admin(request)
+    with db() as conn:
+        if body.oxilife_datapoint_id is not None:
+            exists = conn.execute("SELECT 1 FROM datapoints WHERE id=?", (body.oxilife_datapoint_id,)).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Der ausgewählte Datenpunkt existiert nicht")
+        values = {"tasmota_name": body.tasmota_name.strip(),
+                  "oxilife_datapoint_id": "" if body.oxilife_datapoint_id is None else str(body.oxilife_datapoint_id),
+                  "oxilife_timeout_seconds": str(body.oxilife_timeout_seconds)}
+        for key, value in values.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)", (key, value))
+    return body.model_dump()
 
 
 @app.put("/api/admin/weather")
