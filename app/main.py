@@ -26,7 +26,7 @@ from starlette.middleware.sessions import SessionMiddleware
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/oxilife.db"))
 TASMOTA_BASE_URL = os.getenv("TASMOTA_BASE_URL", "").rstrip("/")
-TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "AtomV5").strip() or "Tasmota"
+TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "ESP32").strip() or "ESP32"
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
@@ -254,6 +254,8 @@ def init_db() -> None:
                             widget_type='gauge',decimals=0,updated_at=?
                             WHERE lower(path) LIKE '%neopool.redox.data'""", (int(time.time()),))
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('redox_measurement_display_v1','1')")
+        if setting(conn, "tasmota_name", TASMOTA_DISPLAY_NAME).strip().lower() == "atomv5":
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('tasmota_name','ESP32')")
 
 
 def hash_password(password: str) -> str:
@@ -972,12 +974,10 @@ def status():
     with db() as conn:
         rows = conn.execute("SELECT * FROM datapoints WHERE visible=1 ORDER BY sort_order,name").fetchall()
         config = connection_config(conn)
-        heartbeat = (conn.execute("SELECT name,last_seen FROM datapoints WHERE id=?", (config["oxilife_datapoint_id"],)).fetchone()
-                     if config["oxilife_datapoint_id"] else None)
-    oxilife_configured = heartbeat is not None
-    oxilife_online = bool(latest["online"] and heartbeat and heartbeat["last_seen"]
-                           and int(time.time()) - heartbeat["last_seen"] <= config["oxilife_timeout_seconds"])
-    pool = neopool_payload(latest.get("raw")) or {}
+    detected_pool = neopool_payload(latest.get("raw"))
+    oxilife_configured = detected_pool is not None
+    oxilife_online = bool(latest["online"] and detected_pool is not None)
+    pool = detected_pool or {}
     filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
     return {"online": latest["online"], "updated_at": latest["updated_at"], "error": latest["error"],
             "server_time": datetime.now().astimezone().isoformat(),
@@ -988,8 +988,8 @@ def status():
             "connections": {
                 "tasmota": {"name": config["tasmota_name"], "online": latest["online"]},
                 "oxilife": {"name": "Oxilife", "online": oxilife_online, "configured": oxilife_configured,
-                             "heartbeat_name": heartbeat["name"] if heartbeat else None,
-                             "last_seen": heartbeat["last_seen"] if heartbeat else None},
+                             "heartbeat_name": "NeoPool JSON" if detected_pool is not None else None,
+                             "last_seen": latest["updated_at"] if detected_pool is not None else None},
             },
             "alarms": neopool_alarms(latest["raw"]),
             "datapoints": [point_dict(row, include_path=False) for row in rows]}

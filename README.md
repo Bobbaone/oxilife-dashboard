@@ -112,7 +112,7 @@ Die Startseite zeigt Tasmota und Oxilife getrennt an. Der Tasmota-Name kann mit 
 Für Oxilife wird im Adminbereich unter **Verbindungsstatus** ein regelmäßig aktualisierter Oxilife-Datenpunkt als Lebenszeichen ausgewählt. Wird er innerhalb des konfigurierten Zeitfensters nicht mehr empfangen, zeigt die Startseite beispielsweise:
 
 ```text
-AtomV5: Online · Oxilife: Offline
+ESP32: Online · Oxilife: Offline
 ```
 
 Ohne ausgewählten Lebenszeichen-Datenpunkt steht Oxilife auf **Nicht konfiguriert**. Das verhindert eine falsche Online-Anzeige, bevor die reale JSON-Struktur der Anlage bekannt ist.
