@@ -144,6 +144,14 @@ WEATHER_REFRESH_SECONDS: 900
 
 Für die Ortsauflösung wird [OpenStreetMap Nominatim](https://nominatim.openstreetmap.org/) verwendet; die Wetterdaten stammen von [Open-Meteo](https://open-meteo.com/). Nichtkommerzielle Nutzung benötigt keinen API-Schlüssel. Der Docker-Container benötigt dafür ausgehenden Internetzugriff. Bei einem vorübergehenden API-Ausfall werden nach Möglichkeit die zuletzt bekannten Daten angezeigt; das übrige Dashboard bleibt funktionsfähig.
 
+## Als App auf dem Home-Bildschirm
+
+Das öffentliche Dashboard ist als Progressive Web App (PWA) vorbereitet. Auf iPhone und iPad die Dashboard-Adresse in Safari öffnen und **Teilen → Zum Home-Bildschirm** auswählen. Auf Android kann im Browser **App installieren** oder **Zum Startbildschirm hinzufügen** verwendet werden.
+
+Die installierte PWA startet mit eigenem Oxilife-Icon im eigenständigen App-Fenster. Ist der Dashboard-Server nicht erreichbar, erscheint eine eindeutige Offline-Seite. Messwerte und Steuerbefehle werden absichtlich nicht offline zwischengespeichert, damit keine veralteten Anlagenzustände als aktuell erscheinen.
+
+Für Installation und Service Worker muss das Dashboard per HTTPS oder lokal über `localhost` aufgerufen werden. Bei Änderungen aktualisiert sich die PWA automatisch mit der veröffentlichten Webseite.
+
 ## E-Mail-Warnung bei niedrigem Wert
 
 Für jeden numerischen Datenpunkt kann im Adminbereich **E-Mail niedrig** aktiviert werden. Fällt der skalierte Messwert unter `Warn min`, sendet das Dashboard beispielsweise:

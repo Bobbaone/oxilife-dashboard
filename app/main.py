@@ -957,6 +957,31 @@ def require_admin(request: Request) -> None:
 def index(): return FileResponse(BASE / "static" / "index.html")
 
 
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def web_manifest():
+    return FileResponse(BASE / "static" / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/service-worker.js", include_in_schema=False)
+def service_worker():
+    return FileResponse(BASE / "static" / "service-worker.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@app.get("/offline", include_in_schema=False)
+def offline_page():
+    return FileResponse(BASE / "static" / "offline.html")
+
+
+@app.get("/icons/{filename}", include_in_schema=False)
+def pwa_icon(filename: str):
+    allowed = {"oxilife-180.png", "oxilife-192.png", "oxilife-512.png", "oxilife-maskable-512.png"}
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Icon nicht gefunden")
+    return FileResponse(BASE / "static" / "icons" / filename, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=604800"})
+
+
 @app.get("/admin")
 def admin(): return FileResponse(BASE / "static" / "admin.html")
 
