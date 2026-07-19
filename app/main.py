@@ -43,10 +43,10 @@ WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
-    "1": os.getenv("FILTER_SPEED_COMMAND_1", ""),
-    "2": os.getenv("FILTER_SPEED_COMMAND_2", ""),
-    "3": os.getenv("FILTER_SPEED_COMMAND_3", ""),
-    "backwash": os.getenv("BACKWASH_COMMAND", ""),
+    "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltrationspeed%201"),
+    "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltrationspeed%202"),
+    "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltrationspeed%203"),
+    "backwash": os.getenv("BACKWASH_COMMAND", "/cm?cmnd=NPFiltrationmode%2013"),
 }
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
 poll_lock = asyncio.Lock()
@@ -1043,11 +1043,36 @@ async def send_command(path: str) -> Any:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+def neopool_payload(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("NeoPool"), dict):
+        return payload["NeoPool"]
+    for value in payload.values():
+        found = neopool_payload(value)
+        if found is not None:
+            return found
+    return None
+
+
 @app.post("/api/filter/{speed}")
 async def filter_speed(speed: str, request: Request):
     require_admin(request)
     if speed not in ("1", "2", "3"): raise HTTPException(status_code=400, detail="Ungültige Filterstufe")
-    return {"ok": True, "result": await send_command(COMMANDS[speed])}
+    result = await send_command(COMMANDS[speed])
+    actual = None
+    for _ in range(3):
+        await asyncio.sleep(0.7)
+        await poll_once()
+        pool = neopool_payload(latest.get("raw"))
+        filtration = pool.get("Filtration", {}) if pool else {}
+        actual = filtration.get("Speed") if isinstance(filtration, dict) else None
+        if str(actual) == speed:
+            return {"ok": True, "speed": int(speed), "verified": True, "result": result}
+    raise HTTPException(status_code=409, detail=(
+        f"Tasmota hat den Befehl erhalten, aber Oxilife meldet weiterhin Pumpenstufe {actual}. "
+        "Die Geschwindigkeitssteuerung muss in der Oxilife-Anlage konfiguriert sein."
+    ))
 
 
 @app.post("/api/backwash")
