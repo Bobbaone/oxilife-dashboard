@@ -203,6 +203,12 @@ def init_db() -> None:
                             AND min_value=10 AND max_value=100 AND warning_low=25 AND warning_high=100""",
                          (int(time.time()),))
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('binary_tank_switch_v1','1')")
+        if setting(conn, "module_flags_v1") != "1":
+            # Module entries only indicate installed hardware; they are not water measurements.
+            conn.execute("""UPDATE datapoints SET unit='',widget_type='status',min_value=NULL,max_value=NULL,
+                            warning_low=NULL,warning_high=NULL,alert_low=0,updated_at=?
+                            WHERE lower(path) LIKE '%.modules.%'""", (int(time.time()),))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('module_flags_v1','1')")
 
 
 def hash_password(password: str) -> str:
@@ -394,6 +400,8 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         if suffix in path_key:
             name = candidate
             break
+    if ".modules." in path_key:
+        name = f"Modul {words}"
     if "neopool.ph.tank" in path_key:
         name = "pH-Tank"
     elif "neopool" in path_key and "chlor" in path_key and "tank" in path_key:
@@ -445,6 +453,10 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         decimals = 1
 
     widget_type = "status" if data_type == "boolean" else "text" if data_type == "text" else "gauge"
+    if ".modules." in path_key:
+        widget_type = "status"
+        unit = ""
+        decimals = 0
     if key in {"speed", "filterspeed", "pumpspeed"}:
         widget_type = "levels"
         name = "Geschwindigkeit Pumpe"
@@ -463,6 +475,8 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
 def datapoint_quality_defaults(path: str) -> dict[str, float | bool | None] | None:
     """Return conservative pool limits in the displayed unit for real measurements."""
     key = re.sub(r"[^a-z0-9]", "", path.lower())
+    if ".modules." in path.lower():
+        return None
     limits: tuple[float | None, float | None, float | None, float | None] | None = None
     alert_low = False
 
@@ -884,11 +898,17 @@ def history(request: Request, hours: int = 24, point_ids: str = ""):
             points = conn.execute("SELECT * FROM datapoints WHERE chart=1 ORDER BY sort_order,name").fetchall()
         series = []
         for point in points:
-            rows = conn.execute("""SELECT (ts / ?) * ? ts, AVG(value_num) value_num,
+            semantic = datapoint_semantic(point["path"])
+            ignore_zero = semantic in {"ph_data", "redox_data"} or point["name"].strip().lower() in {
+                "ph", "ph-wert", "ph wert", "redox", "redox-wert", "redox wert", "orp"
+            }
+            valid_measurement = " AND value_num<>0" if ignore_zero else ""
+            rows = conn.execute(f"""SELECT (ts / ?) * ? ts, AVG(value_num) value_num,
                                   MAX(value_text) value_text FROM readings
-                                  WHERE datapoint_id=? AND ts>=? GROUP BY ts/? ORDER BY ts""",
+                                  WHERE datapoint_id=? AND ts>=?{valid_measurement} GROUP BY ts/? ORDER BY ts""",
                                 (bucket, bucket, point["id"], since, bucket)).fetchall()
-            stats = conn.execute("SELECT COUNT(*) samples,MIN(value_num) min,MAX(value_num) max,AVG(value_num) avg FROM readings WHERE datapoint_id=? AND ts>=?",
+            stats = conn.execute(f"""SELECT COUNT(*) samples,MIN(value_num) min,MAX(value_num) max,AVG(value_num) avg
+                                  FROM readings WHERE datapoint_id=? AND ts>=?{valid_measurement}""",
                                  (point["id"], since)).fetchone()
             scale = point["scale"]
             values = [{**dict(row), "value_num": None if row["value_num"] is None else row["value_num"] * scale} for row in rows]
