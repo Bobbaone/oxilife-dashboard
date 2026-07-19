@@ -151,6 +151,7 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_username',?)", (ADMIN_USER,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('session_token',?)", (secrets.token_urlsafe(32),))
 
 
 def hash_password(password: str) -> str:
@@ -422,10 +423,22 @@ app = FastAPI(title="Oxilife Dashboard", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=False)
 
 
+def valid_admin_session(request: Request) -> bool:
+    if not request.session.get("admin") or not request.session.get("auth_token"):
+        return False
+    with db() as conn:
+        expected = setting(conn, "session_token")
+    return bool(expected and hmac.compare_digest(str(request.session["auth_token"]), expected))
+
+
 def require_admin(request: Request) -> None:
-    if not request.session.get("admin"):
+    if not valid_admin_session(request):
+        request.session.clear()
         raise HTTPException(status_code=401, detail="Nicht angemeldet")
-    if request.session.get("password_change_required"):
+    with db() as conn:
+        change_required = setting(conn, "password_change_required", "1") == "1"
+    request.session["password_change_required"] = change_required
+    if change_required:
         raise HTTPException(status_code=403, detail="Passwortänderung erforderlich")
 
 
@@ -607,8 +620,10 @@ async def login(request: Request):
         admin_username = setting(conn, "admin_username", ADMIN_USER)
         password_hash = setting(conn, "admin_password_hash")
         change_required = setting(conn, "password_change_required", "1") == "1"
+        auth_token = setting(conn, "session_token")
     if body.get("username") == admin_username and verify_password(str(body.get("password", "")), password_hash):
         request.session["admin"] = True
+        request.session["auth_token"] = auth_token
         request.session["password_change_required"] = change_required
         return {"ok": True, "password_change_required": change_required}
     raise HTTPException(status_code=401, detail="Falsche Zugangsdaten")
@@ -616,16 +631,20 @@ async def login(request: Request):
 
 @app.post("/api/change-password")
 def change_password(body: PasswordChange, request: Request):
-    if not request.session.get("admin"):
+    if not valid_admin_session(request):
+        request.session.clear()
         raise HTTPException(status_code=401, detail="Nicht angemeldet")
     if body.password.lower() == "wasserwerte" or body.password == ADMIN_PASSWORD:
         raise HTTPException(status_code=400, detail="Bitte ein neues, individuelles Passwort wählen")
     with db() as conn:
+        new_session_token = secrets.token_urlsafe(32)
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('admin_username',?)",
                      (body.username,))
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('admin_password_hash',?)",
                      (hash_password(body.password),))
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('password_change_required','0')")
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('session_token',?)", (new_session_token,))
+    request.session["auth_token"] = new_session_token
     request.session["password_change_required"] = False
     return {"ok": True}
 
@@ -638,13 +657,17 @@ def logout(request: Request):
 
 @app.get("/api/session")
 def session(request: Request):
-    is_admin = bool(request.session.get("admin"))
+    is_admin = valid_admin_session(request)
     username = ""
     if is_admin:
         with db() as conn:
             username = setting(conn, "admin_username", ADMIN_USER)
+            change_required = setting(conn, "password_change_required", "1") == "1"
+        request.session["password_change_required"] = change_required
+    else:
+        request.session.clear()
     return {"admin": is_admin, "username": username,
-            "password_change_required": bool(request.session.get("password_change_required"))}
+            "password_change_required": bool(request.session.get("password_change_required")) if is_admin else False}
 
 
 async def send_command(path: str) -> Any:
