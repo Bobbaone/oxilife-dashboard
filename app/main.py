@@ -245,6 +245,14 @@ def init_db() -> None:
             conn.execute("""UPDATE datapoints SET min_value=NULL,max_value=NULL,warning_low=NULL,warning_high=NULL,
                             alert_low=0 WHERE lower(path) LIKE '%neopool.hydrolysis.redox'""")
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('neopool_parameter_mapping_v1','1')")
+        if setting(conn, "redox_measurement_display_v1") != "1":
+            # Hydrolysis.Redox is only the Redox-control switch. The actual ORP value is Redox.Data.
+            conn.execute("""UPDATE datapoints SET visible=0,chart=0,updated_at=?
+                            WHERE lower(path) LIKE '%neopool.hydrolysis.redox'""", (int(time.time()),))
+            conn.execute("""UPDATE datapoints SET name='Redox',unit='mV',visible=1,logging=1,chart=1,
+                            widget_type='gauge',decimals=0,updated_at=?
+                            WHERE lower(path) LIKE '%neopool.redox.data'""", (int(time.time()),))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('redox_measurement_display_v1','1')")
 
 
 def hash_password(password: str) -> str:
@@ -740,11 +748,13 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
                     ".hydrolysis.data", ".hydrolysis.setpoint", ".hydrolysis.max")):
                 defaults["unit"] = hydrolysis_unit
             limits = datapoint_quality_defaults(path) or {}
-            auto_visible = int(datapoint_semantic(path) == "filtration_time")
+            semantic = datapoint_semantic(path)
+            auto_visible = int(semantic in {"filtration_time", "redox_data"})
+            auto_chart = int(semantic == "redox_data")
             conn.execute("""INSERT INTO datapoints
-                (path,name,data_type,unit,visible,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
+                (path,name,data_type,unit,visible,chart,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
                  alert_low,auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
                 last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
                 name=CASE WHEN datapoints.auto_configured=1 THEN excluded.name ELSE datapoints.name END,
@@ -757,7 +767,8 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
                 warning_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_low ELSE datapoints.warning_low END,
                 warning_high=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_high ELSE datapoints.warning_high END,
                 alert_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.alert_low ELSE datapoints.alert_low END""",
-                (path, defaults["name"], data_type, defaults["unit"], auto_visible, position, defaults["widget_type"],
+                (path, defaults["name"], data_type, defaults["unit"], auto_visible, auto_chart,
+                 position, defaults["widget_type"],
                  defaults["scale"], defaults["decimals"], limits.get("min_value"), limits.get("max_value"),
                  limits.get("warning_low"), limits.get("warning_high"), int(limits.get("alert_low", False)),
                  text_value, num_value, now, now, now))
