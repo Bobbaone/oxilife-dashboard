@@ -105,21 +105,6 @@ Objekte werden mit Punktpfaden und Arrays mit Indexpfaden erfasst, zum Beispiel 
 
 Nur explizit freigegebene Datenpunkte erscheinen auf der öffentlichen Startseite. Die Historie beginnt für einen Datenpunkt, solange **Logging** aktiv ist. Deaktivieren stoppt neue Einträge, löscht aber keine vorhandenen Daten.
 
-### Demo-Historie für eine neue Installation
-
-Nach dem ersten erfolgreichen Tasmota-Abruf lassen sich einmalig sieben Tage plausible Testwerte für alle registrierten Datenpunkte erzeugen. Vorhandene Zeiträume werden nicht doppelt befüllt und die aktuellen Live-Werte bleiben unverändert:
-
-```bash
-docker compose exec oxilife-dashboard python -m app.seed_demo --days 7 --interval 10
-```
-
-Diese Einträge sind simulierte Vorschauwerte und werden in derselben persistenten SQLite-Datenbank wie echte Messwerte gespeichert.
-Sie sind separat markiert und können später entfernt werden, ohne echte Messwerte zu löschen:
-
-```bash
-docker compose exec oxilife-dashboard python -m app.seed_demo --remove
-```
-
 ## Getrennter Verbindungsstatus
 
 Die Startseite zeigt Tasmota und Oxilife getrennt an. Der Tasmota-Name kann mit `TASMOTA_DISPLAY_NAME` vorbelegt und später im Adminbereich geändert werden. Tasmota gilt als online, wenn die HTTP-Abfrage erfolgreich ist.
