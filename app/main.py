@@ -844,6 +844,13 @@ def timer_clock(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
 
 
+def register_int(value: Any) -> int:
+    """Decode NeoPool register results in either decimal or the default hex format."""
+    if isinstance(value, str):
+        return int(value.strip(), 0)
+    return int(value)
+
+
 async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], now: int) -> None:
     """Read NeoPool filtration timers, which are not part of the regular SENSOR JSON."""
     if now - int(filter_timer_cache["fetched_at"]) >= FILTER_TIMER_POLL_SECONDS:
@@ -854,10 +861,10 @@ async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], 
                 data_response = await client.get(TASMOTA_BASE_URL + f"/cm?cmnd=NPReadL%200x{base + 1:X}%2C7")
                 enabled_response.raise_for_status()
                 data_response.raise_for_status()
-                enabled = int(enabled_response.json().get("NPRead", {}).get("Data", 0))
+                enabled = register_int(enabled_response.json().get("NPRead", {}).get("Data", 0))
                 data = data_response.json().get("NPReadL", {}).get("Data", [])
                 if enabled in (1, 2) and isinstance(data, list) and len(data) >= 4:
-                    start, duration = int(data[0]), int(data[3])
+                    start, duration = register_int(data[0]), register_int(data[3])
                     values[f"Timer{number}"] = f"{timer_clock(start)}–{timer_clock(start + duration)}"
             filter_timer_cache.update(fetched_at=now, values=values)
         except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
@@ -1292,10 +1299,15 @@ async def update_filter_timer(number: int, update: FilterTimerUpdate, request: R
         await send_command(f"/cm?cmnd=NPWrite%200x{base:X}%2C0")
     await send_command("/cm?cmnd=NPExec")
     await send_command("/cm?cmnd=NPSave")
-    filter_timer_cache["fetched_at"] = 0
-    await poll_once()
     expected = f"{update.start}–{update.end}" if update.enabled else None
-    actual = filter_timer_cache["values"].get(f"Timer{number}")
+    actual = None
+    for _ in range(5):
+        await asyncio.sleep(1)
+        filter_timer_cache["fetched_at"] = 0
+        await poll_once()
+        actual = filter_timer_cache["values"].get(f"Timer{number}")
+        if actual == expected:
+            break
     if actual != expected:
         raise HTTPException(status_code=409, detail=f"Gespeichert, aber Rückmeldung ist {actual or 'Aus'} statt {expected or 'Aus'}.")
     return {"ok": True, "number": number, "value": actual or "Aus", "verified": True}
