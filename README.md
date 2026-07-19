@@ -105,6 +105,18 @@ Objekte werden mit Punktpfaden und Arrays mit Indexpfaden erfasst, zum Beispiel 
 
 Nur explizit freigegebene Datenpunkte erscheinen auf der öffentlichen Startseite. Die Historie beginnt für einen Datenpunkt, solange **Logging** aktiv ist. Deaktivieren stoppt neue Einträge, löscht aber keine vorhandenen Daten.
 
+## Getrennter Verbindungsstatus
+
+Die Startseite zeigt Tasmota und Oxilife getrennt an. Der Tasmota-Name kann mit `TASMOTA_DISPLAY_NAME` vorbelegt und später im Adminbereich geändert werden. Tasmota gilt als online, wenn die HTTP-Abfrage erfolgreich ist.
+
+Für Oxilife wird im Adminbereich unter **Verbindungsstatus** ein regelmäßig aktualisierter Oxilife-Datenpunkt als Lebenszeichen ausgewählt. Wird er innerhalb des konfigurierten Zeitfensters nicht mehr empfangen, zeigt die Startseite beispielsweise:
+
+```text
+AtomV5: Online · Oxilife: Offline
+```
+
+Ohne ausgewählten Lebenszeichen-Datenpunkt steht Oxilife auf **Nicht konfiguriert**. Das verhindert eine falsche Online-Anzeige, bevor die reale JSON-Struktur der Anlage bekannt ist.
+
 ## Ampelfarben und Grenzwerte
 
 Die öffentliche Seite verwendet folgende Bewertung:
