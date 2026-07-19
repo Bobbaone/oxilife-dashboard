@@ -43,9 +43,9 @@ WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
-    "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltrationspeed%201"),
-    "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltrationspeed%202"),
-    "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltrationspeed%203"),
+    "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltration%201%2C1"),
+    "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltration%201%2C2"),
+    "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltration%201%2C3"),
     "backwash": os.getenv("BACKWASH_COMMAND", "/cm?cmnd=NPFiltrationmode%2013"),
 }
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
@@ -217,6 +217,26 @@ def init_db() -> None:
                             warning_low=NULL,warning_high=NULL,alert_low=0,updated_at=?
                             WHERE lower(path) LIKE '%.modules.%'""", (int(time.time()),))
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('module_flags_v1','1')")
+        if setting(conn, "neopool_parameter_mapping_v1") != "1":
+            hydro_unit_row = conn.execute("""SELECT last_value_text FROM datapoints
+                                           WHERE lower(path) LIKE '%neopool.hydrolysis.unit'""").fetchone()
+            hydro_unit = hydro_unit_row["last_value_text"] if hydro_unit_row else ""
+            for row in conn.execute("SELECT * FROM datapoints WHERE lower(path) LIKE '%neopool.%'").fetchall():
+                defaults = datapoint_defaults(row["path"], row["data_type"], row["last_value_num"])
+                lowered = row["path"].lower()
+                if hydro_unit and any(lowered.endswith(suffix) for suffix in (
+                        ".hydrolysis.data", ".hydrolysis.setpoint", ".hydrolysis.max")):
+                    defaults["unit"] = hydro_unit
+                known = (".modules." in lowered or ".powerunit." in lowered or ".relay." in lowered
+                         or ".connection." in lowered or ".hydrolysis." in lowered
+                         or ".filtration." in lowered or lowered.endswith(".temperature"))
+                if known:
+                    conn.execute("""UPDATE datapoints SET name=?,unit=?,widget_type=?,scale=?,decimals=?,updated_at=?
+                                    WHERE id=?""", (defaults["name"], defaults["unit"], defaults["widget_type"],
+                                    defaults["scale"], defaults["decimals"], int(time.time()), row["id"]))
+            conn.execute("""UPDATE datapoints SET min_value=NULL,max_value=NULL,warning_low=NULL,warning_high=NULL,
+                            alert_low=0 WHERE lower(path) LIKE '%neopool.hydrolysis.redox'""")
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('neopool_parameter_mapping_v1','1')")
 
 
 def hash_password(password: str) -> str:
@@ -390,17 +410,38 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
     name = names.get(key, words or path)
     path_key = path.lower()
     neopool_names = {
+        "neopool.type": "Anlagentyp",
         "neopool.ph.data": "pH-Wert",
         "neopool.ph.min": "pH Minimum",
         "neopool.ph.max": "pH Maximum",
         "neopool.redox.data": "Redox",
         "neopool.redox.setpoint": "Redox-Sollwert",
+        "neopool.chlorine.data": "Freies Chlor",
+        "neopool.chlorine.setpoint": "Chlor-Sollwert",
+        "neopool.ionization.data": "Ionisationsleistung",
+        "neopool.ionization.setpoint": "Ionisations-Sollwert",
+        "neopool.ionization.max": "Maximale Ionisationsleistung",
         "neopool.hydrolysis.data": "Hydrolyse-Leistung",
         "neopool.hydrolysis.setpoint": "Hydrolyse-Sollwert",
         "neopool.hydrolysis.state": "Zustand Hydrolyse",
+        "neopool.hydrolysis.unit": "Einheit Hydrolyse",
+        "neopool.hydrolysis.max": "Maximale Hydrolyse-Leistung",
+        "neopool.hydrolysis.percent.data": "Hydrolyse-Leistung in Prozent",
+        "neopool.hydrolysis.percent.setpoint": "Hydrolyse-Sollwert in Prozent",
+        "neopool.hydrolysis.runtime.total": "Laufzeit Zelle gesamt",
+        "neopool.hydrolysis.runtime.part": "Laufzeit aktueller Abschnitt",
+        "neopool.hydrolysis.runtime.pol1": "Laufzeit Polarisation 1",
+        "neopool.hydrolysis.runtime.pol2": "Laufzeit Polarisation 2",
+        "neopool.hydrolysis.runtime.changes": "Polarisationswechsel",
+        "neopool.hydrolysis.cover": "Poolabdeckung",
+        "neopool.hydrolysis.boost": "Boost-Modus",
+        "neopool.hydrolysis.low": "Hydrolyse-Leistungsalarm",
+        "neopool.hydrolysis.fl1": "Durchflussalarm Hydrolyse",
+        "neopool.hydrolysis.redox": "Redox-Steuerung Hydrolyse",
         "neopool.filtration.state": "Filterpumpe",
         "neopool.filtration.speed": "Geschwindigkeit Pumpe",
         "neopool.filtration.mode": "Betriebsart Filter",
+        "neopool.light": "Poolbeleuchtung",
         "neopool.conductivity": "Leitfähigkeit",
         "neopool.temperature": "Wassertemperatur",
     }
@@ -409,7 +450,37 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
             name = candidate
             break
     if ".modules." in path_key:
-        name = f"Modul {words}"
+        module_names = {"ph": "pH", "redox": "Redox", "hydrolysis": "Hydrolyse",
+                        "chlorine": "Chlor", "conductivity": "Leitfähigkeit", "ionization": "Ionisation"}
+        name = f"Modul {module_names.get(key, words)}"
+    elif ".powerunit.version" in path_key:
+        name = "Firmware Leistungsteil"
+    elif ".powerunit.nodeid" in path_key:
+        name = "Node-ID"
+    elif ".powerunit.5v" in path_key:
+        name = "Spannung 5 V"
+    elif ".powerunit.12v" in path_key:
+        name = "Spannung 12 V"
+    elif ".powerunit.24-30v" in path_key:
+        name = "Spannung 24–30 V"
+    elif ".powerunit.4-20ma" in path_key:
+        name = "Stromausgang 4–20 mA"
+    elif ".relay.state[" in path_key:
+        index = int(re.search(r"\[(\d+)\]", path_key).group(1)) + 1
+        name = f"Relais {index}"
+    elif ".relay.aux[" in path_key:
+        index = int(re.search(r"\[(\d+)\]", path_key).group(1)) + 1
+        name = f"Aux-Relais {index}"
+    elif ".relay.acid" in path_key:
+        name = "Säurepumpe"
+    elif ".connection.mbrequests" in path_key:
+        name = "Modbus-Anfragen"
+    elif ".connection.mbnoerror" in path_key:
+        name = "Modbus-Anfragen ohne Fehler"
+    elif ".connection.mbnoresponse" in path_key:
+        name = "Modbus ohne Antwort"
+    elif ".connection.mbcrcerr" in path_key:
+        name = "Modbus CRC-Fehler"
     if "neopool.ph.tank" in path_key:
         name = "pH-Tank"
     elif "neopool" in path_key and "chlor" in path_key and "tank" in path_key:
@@ -441,6 +512,16 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         unit = "%"
     elif "neopool.temperature" in path_key:
         unit = "°C"
+    elif any(token in path_key for token in (".powerunit.5v", ".powerunit.12v", ".powerunit.24-30v")):
+        unit = "V"
+    elif ".powerunit.4-20ma" in path_key:
+        unit = "mA"
+    if ".hydrolysis.percent." in path_key:
+        unit = "%"
+    if ".hydrolysis.redox" in path_key:
+        unit = ""
+    if ".chlorine." in path_key:
+        unit = "ppm"
 
     decimals = 0 if data_type in {"boolean", "text"} else 2
     if key in {"temperature", "temp", "humidity", "pressure", "voltage", "current", "power", "energy", "frequency"}:
@@ -465,6 +546,19 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         widget_type = "status"
         unit = ""
         decimals = 0
+    if ".relay." in path_key or any(token in path_key for token in (
+            ".hydrolysis.cover", ".hydrolysis.low", ".hydrolysis.fl1", ".hydrolysis.redox")):
+        widget_type = "status"
+        unit = ""
+        decimals = 0
+    if any(token in path_key for token in (".hydrolysis.boost", ".filtration.mode", ".ph.state",
+                                           ".ph.pump", ".ph.fl1", ".light")):
+        widget_type = "status"
+        unit = ""
+        decimals = 0
+    if ".connection." in path_key:
+        widget_type = "value" if data_type == "number" else "text"
+        decimals = 0
     if key in {"speed", "filterspeed", "pumpspeed"}:
         widget_type = "levels"
         name = "Geschwindigkeit Pumpe"
@@ -483,7 +577,7 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
 def datapoint_quality_defaults(path: str) -> dict[str, float | bool | None] | None:
     """Return conservative pool limits in the displayed unit for real measurements."""
     key = re.sub(r"[^a-z0-9]", "", path.lower())
-    if ".modules." in path.lower():
+    if ".modules." in path.lower() or ".hydrolysis.redox" in path.lower():
         return None
     limits: tuple[float | None, float | None, float | None, float | None] | None = None
     alert_low = False
@@ -530,6 +624,19 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
 
 def datapoint_semantic(path: str) -> str | None:
     lowered = path.lower()
+    if ("neopool.filtration" in lowered and any(token in lowered for token in
+            ("timer", "time", "start", "stop", "end", "duration"))):
+        return "filtration_time"
+    if ".modules." in lowered:
+        return "module_status"
+    if "neopool.hydrolysis.redox" in lowered:
+        return "hydrolysis_redox_control"
+    if "neopool.hydrolysis.boost" in lowered:
+        return "hydrolysis_boost"
+    if "neopool.ph.pump" in lowered:
+        return "ph_pump"
+    if "neopool.ph.state" in lowered:
+        return "ph_state"
     if "neopool" in lowered and "tank" in lowered and ("ph" in lowered or "chlor" in lowered):
         return "tank_switch"
     if "neopool" in lowered and ".modules." not in lowered:
@@ -611,11 +718,16 @@ def neopool_alarms(payload: Any) -> list[dict[str, str]]:
 
 def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]:
     flat = flatten(payload)
+    hydrolysis_unit = next((str(value) for path, value in flat.items()
+                            if path.lower().endswith(".neopool.hydrolysis.unit")), "")
     alerts: list[tuple[int, str, float, str]] = []
     with db() as conn:
         for position, (path, value) in enumerate(flat.items()):
             data_type, text_value, num_value = value_parts(value)
             defaults = datapoint_defaults(path, data_type, num_value)
+            if hydrolysis_unit and any(path.lower().endswith(suffix) for suffix in (
+                    ".hydrolysis.data", ".hydrolysis.setpoint", ".hydrolysis.max")):
+                defaults["unit"] = hydrolysis_unit
             limits = datapoint_quality_defaults(path) or {}
             conn.execute("""INSERT INTO datapoints
                 (path,name,data_type,unit,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
@@ -642,7 +754,7 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
                 conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
                              (point["id"], now, text_value, num_value))
             tank_switch = datapoint_semantic(path) == "tank_switch"
-            tank_empty = tank_switch and str(value).strip().upper() in {"LEER", "EMPTY", "LOW", "1", "TRUE", "ON"}
+            tank_empty = tank_switch and str(value).strip().upper() in {"LEER", "EMPTY", "LOW", "0", "FALSE", "OFF"}
             low = bool(point["alert_low"] and ((num_value is not None and point["warning_low"] is not None
                        and num_value * point["scale"] < point["warning_low"]) or tank_empty))
             if low:
@@ -1067,11 +1179,12 @@ async def filter_speed(speed: str, request: Request):
         pool = neopool_payload(latest.get("raw"))
         filtration = pool.get("Filtration", {}) if pool else {}
         actual = filtration.get("Speed") if isinstance(filtration, dict) else None
-        if str(actual) == speed:
-            return {"ok": True, "speed": int(speed), "verified": True, "result": result}
+        state = filtration.get("State") if isinstance(filtration, dict) else None
+        if str(actual) == speed and int(state or 0) == 1:
+            return {"ok": True, "speed": int(speed), "state": 1, "verified": True, "result": result}
     raise HTTPException(status_code=409, detail=(
         f"Tasmota hat den Befehl erhalten, aber Oxilife meldet weiterhin Pumpenstufe {actual}. "
-        "Die Geschwindigkeitssteuerung muss in der Oxilife-Anlage konfiguriert sein."
+        "Die laufende Filtersteuerung hat den Befehl nicht übernommen."
     ))
 
 
