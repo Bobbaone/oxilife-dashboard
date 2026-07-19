@@ -10,10 +10,12 @@ import sqlite3
 import time
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from email.message import EmailMessage
 from typing import Any
+
+from app.reports import generate_weekly_report
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
@@ -39,6 +41,7 @@ ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
 ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")))
 WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900")))
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
+REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
     "1": os.getenv("FILTER_SPEED_COMMAND_1", ""),
     "2": os.getenv("FILTER_SPEED_COMMAND_2", ""),
@@ -49,6 +52,7 @@ latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error
 poll_lock = asyncio.Lock()
 weather_lock = asyncio.Lock()
 weather_cache: dict[str, Any] = {"fetched_at": 0, "data": None, "error": None}
+last_report_week: tuple[int, int] | None = None
 
 
 class DatapointUpdate(BaseModel):
@@ -450,6 +454,16 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
 
 def datapoint_semantic(path: str) -> str | None:
     lowered = path.lower()
+    mappings = {
+        "neopool.ph.data": "ph_data",
+        "neopool.redox.data": "redox_data",
+        "neopool.hydrolysis.data": "hydrolysis_data",
+        "neopool.hydrolysis.state": "hydrolysis_state",
+        "neopool.temperature": "water_temperature",
+    }
+    for fragment, semantic in mappings.items():
+        if fragment in lowered:
+            return semantic
     if "neopool.filtration.mode" in lowered:
         return "filtration_mode"
     if "neopool.filtration.state" in lowered:
@@ -580,9 +594,28 @@ async def poll_once() -> None:
 
 
 async def poller() -> None:
+    global last_report_week
     while True:
         await poll_once()
+        current_week = tuple(datetime.now().astimezone().isocalendar()[:2])
+        if current_week != last_report_week:
+            try:
+                await asyncio.to_thread(ensure_weekly_report)
+            except Exception as exc:
+                latest["error"] = f"Wochenbericht fehlgeschlagen: {exc}"
+            last_report_week = current_week
         await asyncio.sleep(POLL_SECONDS)
+
+
+def ensure_weekly_report() -> Path:
+    now = datetime.now().astimezone()
+    this_monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    start, end = this_monday - timedelta(days=7), this_monday
+    iso = start.isocalendar()
+    output = REPORT_DIR / f"wochenbericht_{iso.year}_KW{iso.week:02d}.pdf"
+    if not output.exists():
+        generate_weekly_report(DB_PATH, output, int(start.timestamp()), int(end.timestamp()))
+    return output
 
 
 @asynccontextmanager
@@ -626,6 +659,12 @@ def index(): return FileResponse(BASE / "static" / "index.html")
 
 @app.get("/admin")
 def admin(): return FileResponse(BASE / "static" / "admin.html")
+
+
+@app.get("/statistics")
+def statistics_page(request: Request):
+    require_admin(request)
+    return FileResponse(BASE / "static" / "statistics.html")
 
 
 @app.get("/api/status")
@@ -765,6 +804,26 @@ def history(request: Request, hours: int = 24, point_ids: str = ""):
                 scaled_stats["min"], scaled_stats["max"] = scaled_stats["max"], scaled_stats["min"]
             series.append({"datapoint": point_dict(point), "values": values, "stats": scaled_stats})
     return {"hours": hours, "bucket_seconds": bucket, "series": series}
+
+
+@app.get("/api/admin/reports")
+async def weekly_reports(request: Request):
+    require_admin(request)
+    await asyncio.to_thread(ensure_weekly_report)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    return [{"filename": path.name, "size": path.stat().st_size, "created_at": int(path.stat().st_mtime)}
+            for path in sorted(REPORT_DIR.glob("wochenbericht_*.pdf"), reverse=True)]
+
+
+@app.get("/api/admin/reports/{filename}")
+def weekly_report_download(filename: str, request: Request):
+    require_admin(request)
+    if not re.fullmatch(r"wochenbericht_\d{4}_KW\d{2}\.pdf", filename):
+        raise HTTPException(status_code=404, detail="Bericht nicht gefunden")
+    path = REPORT_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Bericht nicht gefunden")
+    return FileResponse(path, media_type="application/pdf", filename=filename)
 
 
 @app.get("/api/admin/logs")
