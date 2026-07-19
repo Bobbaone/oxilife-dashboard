@@ -183,6 +183,18 @@ def init_db() -> None:
                                 WHERE id=?""",
                              (defaults["name"], defaults["unit"], defaults["widget_type"],
                               defaults["scale"], defaults["decimals"], int(time.time()), row["id"]))
+        # Add safe pool defaults once where no limits exist yet. Existing limits remain authoritative.
+        if setting(conn, "quality_limits_v1") != "1":
+            for row in conn.execute("""SELECT * FROM datapoints WHERE min_value IS NULL AND max_value IS NULL
+                                     AND warning_low IS NULL AND warning_high IS NULL""").fetchall():
+                limits = datapoint_quality_defaults(row["path"])
+                if limits:
+                    conn.execute("""UPDATE datapoints SET min_value=?,max_value=?,warning_low=?,warning_high=?,
+                                    alert_low=?,updated_at=? WHERE id=?""",
+                                 (limits["min_value"], limits["max_value"], limits["warning_low"],
+                                  limits["warning_high"], int(limits.get("alert_low", False)),
+                                  int(time.time()), row["id"]))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('quality_limits_v1','1')")
 
 
 def hash_password(password: str) -> str:
@@ -432,6 +444,32 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
     return {"name": name, "unit": unit, "widget_type": widget_type, "scale": scale, "decimals": decimals}
 
 
+def datapoint_quality_defaults(path: str) -> dict[str, float | bool | None] | None:
+    """Return conservative pool limits in the displayed unit for real measurements."""
+    key = re.sub(r"[^a-z0-9]", "", path.lower())
+    limits: tuple[float | None, float | None, float | None, float | None] | None = None
+    alert_low = False
+
+    is_level = any(word in key for word in ("level", "filllevel", "tanklevel", "füllstand", "fuellstand"))
+    if is_level and any(word in key for word in ("ph", "chlor", "chlorine", "cltank")):
+        limits = (10.0, 100.0, 25.0, 100.0)
+        alert_low = True
+    elif "neopoolphdata" in key or key.endswith("ph"):
+        limits = (6.8, 7.6, 7.0, 7.4)
+    elif any(word in key for word in ("neopoolredoxdata", "orpdata", "redoxdata")) or key.endswith(("redox", "orp", "rx")):
+        limits = (550.0, 850.0, 650.0, 750.0)
+    elif ("chlor" in key or "chlorine" in key) and not any(word in key for word in ("setpoint", "target", "min", "max")):
+        limits = (0.3, 3.0, 0.5, 1.5)
+    elif ("neopooltemperature" in key or key.endswith(("temperature", "temp"))) and not any(word in key for word in ("setpoint", "target")):
+        limits = (10.0, 35.0, 20.0, 30.0)
+
+    if limits is None:
+        return None
+    minimum, maximum, warning_low, warning_high = limits
+    return {"min_value": minimum, "max_value": maximum, "warning_low": warning_low,
+            "warning_high": warning_high, "alert_low": alert_low}
+
+
 def display_name(path: str) -> str:
     return datapoint_defaults(path, "text")["name"]
 
@@ -533,18 +571,27 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str
         for position, (path, value) in enumerate(flat.items()):
             data_type, text_value, num_value = value_parts(value)
             defaults = datapoint_defaults(path, data_type, num_value)
+            limits = datapoint_quality_defaults(path) or {}
             conn.execute("""INSERT INTO datapoints
-                (path,name,data_type,unit,sort_order,widget_type,scale,decimals,auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+                (path,name,data_type,unit,sort_order,widget_type,scale,decimals,min_value,max_value,warning_low,warning_high,
+                 alert_low,auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
                 last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
                 name=CASE WHEN datapoints.auto_configured=1 THEN excluded.name ELSE datapoints.name END,
                 unit=CASE WHEN datapoints.auto_configured=1 THEN excluded.unit ELSE datapoints.unit END,
                 widget_type=CASE WHEN datapoints.auto_configured=1 THEN excluded.widget_type ELSE datapoints.widget_type END,
                 decimals=CASE WHEN datapoints.auto_configured=1 THEN excluded.decimals ELSE datapoints.decimals END,
-                scale=CASE WHEN datapoints.auto_configured=1 THEN excluded.scale ELSE datapoints.scale END""",
+                scale=CASE WHEN datapoints.auto_configured=1 THEN excluded.scale ELSE datapoints.scale END,
+                min_value=CASE WHEN datapoints.auto_configured=1 THEN excluded.min_value ELSE datapoints.min_value END,
+                max_value=CASE WHEN datapoints.auto_configured=1 THEN excluded.max_value ELSE datapoints.max_value END,
+                warning_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_low ELSE datapoints.warning_low END,
+                warning_high=CASE WHEN datapoints.auto_configured=1 THEN excluded.warning_high ELSE datapoints.warning_high END,
+                alert_low=CASE WHEN datapoints.auto_configured=1 THEN excluded.alert_low ELSE datapoints.alert_low END""",
                 (path, defaults["name"], data_type, defaults["unit"], position, defaults["widget_type"],
-                 defaults["scale"], defaults["decimals"], text_value, num_value, now, now, now))
+                 defaults["scale"], defaults["decimals"], limits.get("min_value"), limits.get("max_value"),
+                 limits.get("warning_low"), limits.get("warning_high"), int(limits.get("alert_low", False)),
+                 text_value, num_value, now, now, now))
             point = conn.execute("SELECT * FROM datapoints WHERE path=?", (path,)).fetchone()
             if point["logging"]:
                 conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
