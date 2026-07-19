@@ -195,6 +195,14 @@ def init_db() -> None:
                                   limits["warning_high"], int(limits.get("alert_low", False)),
                                   int(time.time()), row["id"]))
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('quality_limits_v1','1')")
+        if setting(conn, "binary_tank_switch_v1") != "1":
+            # Remove the percentage defaults from the short-lived tank-level implementation.
+            conn.execute("""UPDATE datapoints SET unit='',widget_type='status',min_value=NULL,max_value=NULL,
+                            warning_low=NULL,warning_high=NULL,alert_low=0,updated_at=?
+                            WHERE (lower(path) LIKE '%ph%tank%' OR lower(path) LIKE '%chlor%tank%')
+                            AND min_value=10 AND max_value=100 AND warning_low=25 AND warning_high=100""",
+                         (int(time.time()),))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('binary_tank_switch_v1','1')")
 
 
 def hash_password(password: str) -> str:
@@ -386,6 +394,10 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         if suffix in path_key:
             name = candidate
             break
+    if "neopool.ph.tank" in path_key:
+        name = "pH-Tank"
+    elif "neopool" in path_key and "chlor" in path_key and "tank" in path_key:
+        name = "Chlor-Tank"
     if key in {"level", "filllevel", "tanklevel"}:
         if "ph" in full:
             name = "pH-Füllstand"
@@ -441,6 +453,10 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
     elif "neopool.filtration.state" in path_key:
         widget_type = "status"
         decimals = 0
+    elif "neopool" in path_key and "tank" in path_key and ("ph" in path_key or "chlor" in path_key):
+        widget_type = "status"
+        unit = ""
+        decimals = 0
     return {"name": name, "unit": unit, "widget_type": widget_type, "scale": scale, "decimals": decimals}
 
 
@@ -450,11 +466,7 @@ def datapoint_quality_defaults(path: str) -> dict[str, float | bool | None] | No
     limits: tuple[float | None, float | None, float | None, float | None] | None = None
     alert_low = False
 
-    is_level = any(word in key for word in ("level", "filllevel", "tanklevel", "füllstand", "fuellstand"))
-    if is_level and any(word in key for word in ("ph", "chlor", "chlorine", "cltank")):
-        limits = (10.0, 100.0, 25.0, 100.0)
-        alert_low = True
-    elif "neopoolphdata" in key or key.endswith("ph"):
+    if "neopoolphdata" in key or key.endswith("ph"):
         limits = (6.8, 7.6, 7.0, 7.4)
     elif any(word in key for word in ("neopoolredoxdata", "orpdata", "redoxdata")) or key.endswith(("redox", "orp", "rx")):
         limits = (550.0, 850.0, 650.0, 750.0)
@@ -493,6 +505,8 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
 
 def datapoint_semantic(path: str) -> str | None:
     lowered = path.lower()
+    if "neopool" in lowered and "tank" in lowered and ("ph" in lowered or "chlor" in lowered):
+        return "tank_switch"
     mappings = {
         "neopool.ph.data": "ph_data",
         "neopool.redox.data": "redox_data",
