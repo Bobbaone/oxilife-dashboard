@@ -1,7 +1,6 @@
 services:
   oxilife-dashboard:
     image: ghcr.io/bobbaone/oxilife-dashboard:latest
-    build: .
     container_name: oxilife-dashboard
     restart: unless-stopped
     ports:
