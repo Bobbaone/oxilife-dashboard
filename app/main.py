@@ -8,6 +8,7 @@ import secrets
 import smtplib
 import sqlite3
 import time
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -147,11 +148,25 @@ def init_db() -> None:
             conn.execute("ALTER TABLE datapoints ADD COLUMN alert_active INTEGER NOT NULL DEFAULT 0")
         if "last_alert_at" not in columns:
             conn.execute("ALTER TABLE datapoints ADD COLUMN last_alert_at INTEGER")
+        if "auto_configured" not in columns:
+            conn.execute("ALTER TABLE datapoints ADD COLUMN auto_configured INTEGER NOT NULL DEFAULT 0")
         initial_hash = hash_password(ADMIN_PASSWORD)
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_username',?)", (ADMIN_USER,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('session_token',?)", (secrets.token_urlsafe(32),))
+        # Upgrade only untouched legacy rows. Explicit admin choices remain authoritative.
+        for row in conn.execute("SELECT * FROM datapoints").fetchall():
+            legacy_name = row["path"].replace(".", " › ").replace("_", " ")
+            untouched = (row["name"] == legacy_name and row["unit"] == "" and row["widget_type"] == "value"
+                         and row["scale"] == 1.0 and row["decimals"] == 2)
+            if untouched:
+                defaults = datapoint_defaults(row["path"], row["data_type"], row["last_value_num"])
+                conn.execute("""UPDATE datapoints SET name=?,unit=?,widget_type=?,scale=?,decimals=?,updated_at=?
+                                WHERE id=?""",
+                             (defaults["name"], defaults["unit"], defaults["widget_type"],
+                              defaults["scale"], defaults["decimals"], int(time.time()), row["id"]))
+                conn.execute("UPDATE datapoints SET auto_configured=1 WHERE id=?", (row["id"],))
 
 
 def hash_password(password: str) -> str:
@@ -300,8 +315,69 @@ def value_parts(value: Any) -> tuple[str, str | None, float | None]:
     return "text", json.dumps(value, ensure_ascii=False), None
 
 
+def _words(value: str) -> str:
+    value = re.sub(r"\[(\d+)\]", r" \1", value)
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    return re.sub(r"[_\-]+", " ", value).strip()
+
+
+def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = None) -> dict[str, Any]:
+    """Return useful presentation defaults without tying ingestion to fixed sensors."""
+    leaf = re.split(r"\.|(?=\[)", path)[-1]
+    words = _words(leaf)
+    key = re.sub(r"[^a-z0-9]", "", words.lower())
+    full = re.sub(r"[^a-z0-9]", "", path.lower())
+
+    names = {
+        "ph": "pH-Wert", "orp": "Redox", "rx": "Redox", "redox": "Redox",
+        "chlorine": "Chlor", "chlor": "Chlor", "cl": "Chlor",
+        "temperature": "Temperatur", "temp": "Temperatur", "humidity": "Luftfeuchtigkeit",
+        "pressure": "Luftdruck", "voltage": "Spannung", "current": "Stromstärke",
+        "power": "Leistung", "energy": "Energie", "frequency": "Frequenz",
+        "speed": "Geschwindigkeit", "rpm": "Drehzahl", "level": "Füllstand",
+        "filllevel": "Füllstand", "tanklevel": "Füllstand", "time": "Zeit",
+    }
+    name = names.get(key, words or path)
+    if key in {"level", "filllevel", "tanklevel"}:
+        if "ph" in full:
+            name = "pH-Füllstand"
+        elif any(token in full for token in ("chlor", "cltank")):
+            name = "Chlor-Füllstand"
+
+    unit = ""
+    unit_rules = (
+        (("temperature", "temp"), "°C"), (("humidity",), "%"),
+        (("pressure",), "hPa"), (("voltage",), "V"), (("current",), "A"),
+        (("power",), "W"), (("energy",), "kWh"), (("frequency",), "Hz"),
+        (("rpm",), "U/min"), (("level", "filllevel", "tanklevel", "percent"), "%"),
+        (("orp", "redox", "rx"), "mV"), (("chlorine", "chlor"), "mg/l"),
+    )
+    for keys, candidate in unit_rules:
+        if key in keys:
+            unit = candidate
+            break
+
+    decimals = 0 if data_type in {"boolean", "text"} else 2
+    if key in {"temperature", "temp", "humidity", "pressure", "voltage", "current", "power", "energy", "frequency"}:
+        decimals = 1
+    scale = 1.0
+    magnitude = abs(numeric_value) if numeric_value is not None else 0
+    if key == "ph" and magnitude > 14:
+        scale = 0.1 if magnitude <= 140 else 0.01
+    elif key in {"temperature", "temp"} and magnitude > 100:
+        scale = 0.1
+    elif key in {"chlorine", "chlor", "cl"} and magnitude > 20:
+        scale = 0.01
+
+    widget_type = "status" if data_type == "boolean" else "text" if data_type == "text" else "gauge"
+    if key in {"speed", "filterspeed", "pumpspeed"}:
+        widget_type = "levels"
+        name = "Geschwindigkeit Pumpe"
+    return {"name": name, "unit": unit, "widget_type": widget_type, "scale": scale, "decimals": decimals}
+
+
 def display_name(path: str) -> str:
-    return path.replace(".", " › ").replace("_", " ")
+    return datapoint_defaults(path, "text")["name"]
 
 
 def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
@@ -326,12 +402,15 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str
     with db() as conn:
         for position, (path, value) in enumerate(flat.items()):
             data_type, text_value, num_value = value_parts(value)
+            defaults = datapoint_defaults(path, data_type, num_value)
             conn.execute("""INSERT INTO datapoints
-                (path,name,data_type,sort_order,last_value_text,last_value_num,last_seen,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+                (path,name,data_type,unit,sort_order,widget_type,scale,decimals,auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
-                last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at""",
-                (path, display_name(path), data_type, position, text_value, num_value, now, now, now))
+                last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
+                scale=CASE WHEN datapoints.auto_configured=1 THEN excluded.scale ELSE datapoints.scale END""",
+                (path, defaults["name"], data_type, defaults["unit"], position, defaults["widget_type"],
+                 defaults["scale"], defaults["decimals"], text_value, num_value, now, now, now))
             point = conn.execute("SELECT * FROM datapoints WHERE path=?", (path,)).fetchone()
             if point["logging"]:
                 conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
@@ -549,7 +628,7 @@ def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request)
         raise HTTPException(status_code=400, detail="Für die E-Mail-Warnung muss Warn min gesetzt sein")
     fields = list(values)
     with db() as conn:
-        cursor = conn.execute(f"UPDATE datapoints SET {','.join(f'{key}=?' for key in fields)},updated_at=? WHERE id=?",
+        cursor = conn.execute(f"UPDATE datapoints SET {','.join(f'{key}=?' for key in fields)},auto_configured=0,updated_at=? WHERE id=?",
                               (*[int(v) if isinstance(v, bool) else v for v in values.values()], int(time.time()), point_id))
         if not cursor.rowcount:
             raise HTTPException(status_code=404, detail="Datenpunkt nicht gefunden")
