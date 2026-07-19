@@ -977,8 +977,14 @@ def status():
     oxilife_configured = heartbeat is not None
     oxilife_online = bool(latest["online"] and heartbeat and heartbeat["last_seen"]
                            and int(time.time()) - heartbeat["last_seen"] <= config["oxilife_timeout_seconds"])
+    pool = neopool_payload(latest.get("raw")) or {}
+    filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
     return {"online": latest["online"], "updated_at": latest["updated_at"], "error": latest["error"],
             "server_time": datetime.now().astimezone().isoformat(),
+            "filtration": {
+                "state": filtration.get("State") if isinstance(filtration, dict) else None,
+                "mode": filtration.get("Mode") if isinstance(filtration, dict) else None,
+            },
             "connections": {
                 "tasmota": {"name": config["tasmota_name"], "online": latest["online"]},
                 "oxilife": {"name": "Oxilife", "online": oxilife_online, "configured": oxilife_configured,
