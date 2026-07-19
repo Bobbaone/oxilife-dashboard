@@ -1,6 +1,6 @@
 services:
   oxilife-dashboard:
-    image: oxilife-dashboard:latest
+    image: ghcr.io/bobbaone/oxilife-dashboard:latest
     build: .
     container_name: oxilife-dashboard
     restart: unless-stopped

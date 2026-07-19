@@ -79,6 +79,16 @@ docker compose down
 docker compose up -d
 ```
 
+Auf das neueste veröffentlichte GHCR-Image aktualisieren:
+
+```bash
+docker compose down
+docker compose pull
+docker compose up -d --force-recreate
+```
+
+Für einen lokalen Build direkt aus dem ausgecheckten Quellcode stattdessen `docker compose up -d --build` verwenden.
+
 Eine Installation mit dem fertigen Image aktualisieren:
 
 ```bash
