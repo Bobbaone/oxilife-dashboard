@@ -36,6 +36,7 @@ SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
 ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")))
 WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900")))
+WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 COMMANDS = {
     "1": os.getenv("FILTER_SPEED_COMMAND_1", ""),
     "2": os.getenv("FILTER_SPEED_COMMAND_2", ""),
@@ -211,8 +212,20 @@ async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
     return {"postal_code": postal_code, "latitude": float(item["lat"]), "longitude": float(item["lon"]), "city": city}
 
 
+def save_weather_location(location: dict[str, Any]) -> None:
+    with db() as conn:
+        for key, value in location.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)", (f"weather_{key}", str(value)))
+
+
 async def current_weather(force: bool = False) -> dict[str, Any]:
     location = weather_location()
+    if not location and len(WEATHER_POSTAL_CODE) == 5 and WEATHER_POSTAL_CODE.isdigit():
+        try:
+            location = await resolve_postal_code(WEATHER_POSTAL_CODE)
+            save_weather_location(location)
+        except HTTPException as exc:
+            return {"enabled": True, "postal_code": WEATHER_POSTAL_CODE, "stale": True, "error": str(exc.detail)}
     if not location:
         return {"enabled": False}
     now = int(time.time())
@@ -450,9 +463,7 @@ def admin_weather(request: Request):
 async def update_weather(body: WeatherUpdate, request: Request):
     require_admin(request)
     location = await resolve_postal_code(body.postal_code)
-    with db() as conn:
-        for key, value in location.items():
-            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)", (f"weather_{key}", str(value)))
+    save_weather_location(location)
     weather_cache.update(fetched_at=0, data=None, error=None)
     weather_data = await current_weather(force=True)
     return {**location, "weather": weather_data}
