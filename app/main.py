@@ -445,6 +445,7 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
         "decimals": row["decimals"], "min_value": row["min_value"], "max_value": row["max_value"],
         "warning_low": row["warning_low"], "warning_high": row["warning_high"],
         "alert_low": bool(row["alert_low"]), "semantic": datapoint_semantic(row["path"]),
+        "importance": datapoint_importance(row["path"]),
         "value": value, "raw_value": row["last_value_text"], "last_seen": row["last_seen"],
     }
     if include_path:
@@ -471,6 +472,26 @@ def datapoint_semantic(path: str) -> str | None:
     if "neopool.filtration.speed" in lowered:
         return "filtration_speed"
     return None
+
+
+def datapoint_importance(path: str) -> int:
+    lowered = path.lower()
+    priorities = (
+        ("neopool.ph.data", 0), ("neopool.redox.data", 1), ("neopool.hydrolysis.data", 2),
+        ("neopool.temperature", 3), ("neopool.filtration.state", 4), ("neopool.filtration.mode", 5),
+        ("neopool.filtration.speed", 6), ("neopool.ph.state", 7), ("neopool.ph.tank", 8),
+        ("neopool.hydrolysis.state", 9), ("neopool.hydrolysis.low", 10),
+        ("neopool.hydrolysis.fl1", 11), ("neopool.chlorine.data", 12),
+        ("neopool.conductivity", 13), ("neopool.ionization.data", 14),
+    )
+    for fragment, priority in priorities:
+        if fragment in lowered:
+            return priority
+    if ".modules." in lowered:
+        return 200
+    if ".connection." in lowered or ".powerunit." in lowered:
+        return 300
+    return 100
 
 
 def neopool_alarms(payload: Any) -> list[dict[str, str]]:
@@ -662,9 +683,7 @@ def admin(): return FileResponse(BASE / "static" / "admin.html")
 
 
 @app.get("/statistics")
-def statistics_page(request: Request):
-    require_admin(request)
-    return FileResponse(BASE / "static" / "statistics.html")
+def statistics_page(): return FileResponse(BASE / "static" / "statistics.html")
 
 
 @app.get("/api/status")
