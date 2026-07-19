@@ -44,9 +44,9 @@ WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
-    "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltration%201%2C1"),
-    "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltration%201%2C2"),
-    "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltration%201%2C3"),
+    "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltrationspeed%201"),
+    "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltrationspeed%202"),
+    "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltrationspeed%203"),
     "backwash": os.getenv("BACKWASH_COMMAND", "/cm?cmnd=NPFiltrationmode%2013"),
 }
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
@@ -1231,15 +1231,15 @@ async def filter_speed(speed: str, request: Request):
     if speed not in ("1", "2", "3"): raise HTTPException(status_code=400, detail="Ungültige Filterstufe")
     result = await send_command(COMMANDS[speed])
     actual = None
-    for _ in range(3):
-        await asyncio.sleep(0.7)
+    for _ in range(8):
+        await asyncio.sleep(1.5)
         await poll_once()
         pool = neopool_payload(latest.get("raw"))
         filtration = pool.get("Filtration", {}) if pool else {}
         actual = filtration.get("Speed") if isinstance(filtration, dict) else None
         state = filtration.get("State") if isinstance(filtration, dict) else None
-        if str(actual) == speed and int(state or 0) == 1:
-            return {"ok": True, "speed": int(speed), "state": 1, "verified": True, "result": result}
+        if str(actual) == speed:
+            return {"ok": True, "speed": int(speed), "state": int(state or 0), "verified": True, "result": result}
     raise HTTPException(status_code=409, detail=(
         f"Tasmota hat den Befehl erhalten, aber Oxilife meldet weiterhin Pumpenstufe {actual}. "
         "Die laufende Filtersteuerung hat den Befehl nicht übernommen."
@@ -1252,13 +1252,15 @@ async def filter_mode(mode: int, request: Request):
     if mode not in (0, 1, 2, 3, 4):
         raise HTTPException(status_code=400, detail="Ungültige Betriebsart")
     result = await send_command(f"/cm?cmnd=NPFiltrationmode%20{mode}")
-    await asyncio.sleep(1)
-    await poll_once()
-    filtration = (neopool_payload(latest.get("raw")) or {}).get("Filtration", {})
-    actual = filtration.get("Mode") if isinstance(filtration, dict) else None
-    if str(actual) != str(mode):
-        raise HTTPException(status_code=409, detail=f"Oxilife meldet weiterhin Betriebsart {actual}.")
-    return {"ok": True, "mode": mode, "verified": True, "result": result}
+    actual = None
+    for _ in range(8):
+        await asyncio.sleep(1.5)
+        await poll_once()
+        filtration = (neopool_payload(latest.get("raw")) or {}).get("Filtration", {})
+        actual = filtration.get("Mode") if isinstance(filtration, dict) else None
+        if str(actual) == str(mode):
+            return {"ok": True, "mode": mode, "verified": True, "result": result}
+    raise HTTPException(status_code=409, detail=f"Oxilife meldet weiterhin Betriebsart {actual}.")
 
 
 @app.get("/api/admin/filter-timers")

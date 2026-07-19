@@ -7,7 +7,7 @@ services:
       - "8090:8000"
     environment:
       TZ: Europe/Berlin
-      TASMOTA_BASE_URL: http://192.168.1.50
+      TASMOTA_BASE_URL: ${TASMOTA_BASE_URL:-http://192.168.1.50}
       TASMOTA_DISPLAY_NAME: AtomV5
       TASMOTA_STATUS_PATH: /cm?cmnd=Status%2010
       POLL_SECONDS: 10
@@ -23,9 +23,9 @@ services:
       # ALERT_COOLDOWN_SECONDS: 3600
       WEATHER_POSTAL_CODE: "75015"
       WEATHER_REFRESH_SECONDS: 900
-      FILTER_SPEED_COMMAND_1: /cm?cmnd=NPFiltration%201%2C1
-      FILTER_SPEED_COMMAND_2: /cm?cmnd=NPFiltration%201%2C2
-      FILTER_SPEED_COMMAND_3: /cm?cmnd=NPFiltration%201%2C3
+      FILTER_SPEED_COMMAND_1: /cm?cmnd=NPFiltrationspeed%201
+      FILTER_SPEED_COMMAND_2: /cm?cmnd=NPFiltrationspeed%202
+      FILTER_SPEED_COMMAND_3: /cm?cmnd=NPFiltrationspeed%203
       BACKWASH_COMMAND: /cm?cmnd=NPFiltrationmode%2013
     volumes:
       - oxilife-data:/app/data
