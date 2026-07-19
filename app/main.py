@@ -865,7 +865,8 @@ async def add_filter_timers(client: httpx.AsyncClient, payload: dict[str, Any], 
                 data = data_response.json().get("NPReadL", {}).get("Data", [])
                 if enabled in (1, 2) and isinstance(data, list) and len(data) >= 4:
                     start, duration = register_int(data[0]), register_int(data[3])
-                    values[f"Timer{number}"] = f"{timer_clock(start)}–{timer_clock(start + duration)}"
+                    if duration > 0:
+                        values[f"Timer{number}"] = f"{timer_clock(start)}–{timer_clock(start + duration)}"
             filter_timer_cache.update(fetched_at=now, values=values)
         except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
             filter_timer_cache["fetched_at"] = now
