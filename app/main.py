@@ -167,6 +167,12 @@ def init_db() -> None:
                              (defaults["name"], defaults["unit"], defaults["widget_type"],
                               defaults["scale"], defaults["decimals"], int(time.time()), row["id"]))
                 conn.execute("UPDATE datapoints SET auto_configured=1 WHERE id=?", (row["id"],))
+            elif row["name"] in {"State", "Mode", "Speed", "Conductivity"} and "neopool" in row["path"].lower():
+                defaults = datapoint_defaults(row["path"], row["data_type"], row["last_value_num"])
+                conn.execute("""UPDATE datapoints SET name=?,unit=?,widget_type=?,scale=?,decimals=?,updated_at=?
+                                WHERE id=?""",
+                             (defaults["name"], defaults["unit"], defaults["widget_type"],
+                              defaults["scale"], defaults["decimals"], int(time.time()), row["id"]))
 
 
 def hash_password(password: str) -> str:
@@ -338,6 +344,26 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         "filllevel": "Füllstand", "tanklevel": "Füllstand", "time": "Zeit",
     }
     name = names.get(key, words or path)
+    path_key = path.lower()
+    neopool_names = {
+        "neopool.ph.data": "pH-Wert",
+        "neopool.ph.min": "pH Minimum",
+        "neopool.ph.max": "pH Maximum",
+        "neopool.redox.data": "Redox",
+        "neopool.redox.setpoint": "Redox-Sollwert",
+        "neopool.hydrolysis.data": "Hydrolyse-Leistung",
+        "neopool.hydrolysis.setpoint": "Hydrolyse-Sollwert",
+        "neopool.hydrolysis.state": "Zustand Hydrolyse",
+        "neopool.filtration.state": "Filterpumpe",
+        "neopool.filtration.speed": "Geschwindigkeit Pumpe",
+        "neopool.filtration.mode": "Filtermodus",
+        "neopool.conductivity": "Leitfähigkeit",
+        "neopool.temperature": "Wassertemperatur",
+    }
+    for suffix, candidate in neopool_names.items():
+        if suffix in path_key:
+            name = candidate
+            break
     if key in {"level", "filllevel", "tanklevel"}:
         if "ph" in full:
             name = "pH-Füllstand"
@@ -351,28 +377,48 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         (("power",), "W"), (("energy",), "kWh"), (("frequency",), "Hz"),
         (("rpm",), "U/min"), (("level", "filllevel", "tanklevel", "percent"), "%"),
         (("orp", "redox", "rx"), "mV"), (("chlorine", "chlor"), "mg/l"),
+        (("conductivity",), "%"),
     )
     for keys, candidate in unit_rules:
         if key in keys:
             unit = candidate
             break
+    if "neopool.ph." in path_key:
+        unit = "pH"
+    elif "neopool.redox." in path_key:
+        unit = "mV"
+    elif "neopool.conductivity" in path_key:
+        unit = "%"
+    elif "neopool.temperature" in path_key:
+        unit = "°C"
 
     decimals = 0 if data_type in {"boolean", "text"} else 2
     if key in {"temperature", "temp", "humidity", "pressure", "voltage", "current", "power", "energy", "frequency"}:
         decimals = 1
     scale = 1.0
     magnitude = abs(numeric_value) if numeric_value is not None else 0
-    if key == "ph" and magnitude > 14:
+    if (key == "ph" or "neopool.ph.data" in path_key) and magnitude > 14:
         scale = 0.1 if magnitude <= 140 else 0.01
     elif key in {"temperature", "temp"} and magnitude > 100:
         scale = 0.1
     elif key in {"chlorine", "chlor", "cl"} and magnitude > 20:
         scale = 0.01
+    if "neopool.ph." in path_key:
+        decimals = 2
+    elif "neopool.redox." in path_key or "neopool.conductivity" in path_key:
+        decimals = 0
+    elif "neopool.temperature" in path_key:
+        decimals = 1
 
     widget_type = "status" if data_type == "boolean" else "text" if data_type == "text" else "gauge"
     if key in {"speed", "filterspeed", "pumpspeed"}:
         widget_type = "levels"
         name = "Geschwindigkeit Pumpe"
+    if "neopool.hydrolysis.state" in path_key:
+        widget_type = "text"
+    elif "neopool.filtration.state" in path_key:
+        widget_type = "status"
+        decimals = 0
     return {"name": name, "unit": unit, "widget_type": widget_type, "scale": scale, "decimals": decimals}
 
 
@@ -396,6 +442,38 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
     return item
 
 
+def neopool_alarms(payload: Any) -> list[dict[str, str]]:
+    """Translate documented NeoPool status fields into user-facing plant alarms."""
+    if not isinstance(payload, dict):
+        return []
+    pool = payload.get("NeoPool")
+    if not isinstance(pool, dict):
+        for value in payload.values():
+            alarms = neopool_alarms(value)
+            if alarms or isinstance(value, dict) and "NeoPool" in value:
+                return alarms
+        return []
+    result: list[dict[str, str]] = []
+    ph = pool.get("pH", {}) if isinstance(pool.get("pH"), dict) else {}
+    ph_code = int(ph.get("State", 0) or 0)
+    ph_messages = {
+        1: "pH-Wert deutlich zu hoch", 2: "pH-Wert deutlich zu niedrig",
+        3: "Maximale Laufzeit der pH-Pumpe überschritten", 4: "pH-Wert über dem Sollwert",
+        5: "pH-Wert unter dem Sollwert", 6: "pH-Tank leer",
+    }
+    if ph_code in ph_messages:
+        result.append({"code": f"AL{ph_code}", "title": "pH-Alarm", "detail": ph_messages[ph_code],
+                       "severity": "warning" if ph_code in (4, 5) else "critical"})
+    hydro = pool.get("Hydrolysis", {}) if isinstance(pool.get("Hydrolysis"), dict) else {}
+    if str(hydro.get("State", "")).upper() == "FLOW" or int(hydro.get("FL1", 0) or 0) == 1:
+        result.append({"code": "FLOW", "title": "Hydrolyse-Alarm",
+                       "detail": "Kein Wasserdurchfluss an der Hydrolysezelle", "severity": "critical"})
+    if int(hydro.get("Low", 0) or 0) == 1:
+        result.append({"code": "LOW", "title": "Hydrolyse-Alarm",
+                       "detail": "Hydrolyse erreicht den Sollwert nicht", "severity": "warning"})
+    return result
+
+
 def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str]]:
     flat = flatten(payload)
     alerts: list[tuple[int, str, float, str]] = []
@@ -408,6 +486,10 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str
                 VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
                 data_type=excluded.data_type,last_value_text=excluded.last_value_text,
                 last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
+                name=CASE WHEN datapoints.auto_configured=1 THEN excluded.name ELSE datapoints.name END,
+                unit=CASE WHEN datapoints.auto_configured=1 THEN excluded.unit ELSE datapoints.unit END,
+                widget_type=CASE WHEN datapoints.auto_configured=1 THEN excluded.widget_type ELSE datapoints.widget_type END,
+                decimals=CASE WHEN datapoints.auto_configured=1 THEN excluded.decimals ELSE datapoints.decimals END,
                 scale=CASE WHEN datapoints.auto_configured=1 THEN excluded.scale ELSE datapoints.scale END""",
                 (path, defaults["name"], data_type, defaults["unit"], position, defaults["widget_type"],
                  defaults["scale"], defaults["decimals"], text_value, num_value, now, now, now))
@@ -547,6 +629,7 @@ def status():
                              "heartbeat_name": heartbeat["name"] if heartbeat else None,
                              "last_seen": heartbeat["last_seen"] if heartbeat else None},
             },
+            "alarms": neopool_alarms(latest["raw"]),
             "datapoints": [point_dict(row, include_path=False) for row in rows]}
 
 
@@ -639,9 +722,9 @@ def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request)
 @app.get("/api/admin/history")
 def history(request: Request, hours: int = 24, point_ids: str = ""):
     require_admin(request)
-    hours = min(max(hours, 1), 8760)
+    hours = min(max(hours, 1), 43800)
     since = int(time.time()) - hours * 3600
-    bucket = 60 if hours <= 6 else 300 if hours <= 48 else 1800 if hours <= 168 else 7200 if hours <= 744 else 21600
+    bucket = 60 if hours <= 6 else 300 if hours <= 48 else 1800 if hours <= 168 else 7200 if hours <= 744 else 21600 if hours <= 8760 else 86400
     requested = [int(x) for x in point_ids.split(",") if x.strip().isdigit()]
     with db() as conn:
         if requested:
