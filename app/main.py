@@ -510,6 +510,12 @@ def datapoint_semantic(path: str) -> str | None:
     lowered = path.lower()
     if "neopool" in lowered and "tank" in lowered and ("ph" in lowered or "chlor" in lowered):
         return "tank_switch"
+    if "neopool" in lowered and ".modules." not in lowered:
+        if lowered.endswith(".ph") or ".ph.data" in lowered or lowered.endswith(".ph.data"):
+            return "ph_data"
+        if lowered.endswith((".redox", ".orp", ".rx")) or any(
+                fragment in lowered for fragment in (".redox.data", ".orp.data", ".rx.data")):
+            return "redox_data"
     mappings = {
         "neopool.ph.data": "ph_data",
         "neopool.redox.data": "redox_data",
