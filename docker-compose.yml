@@ -14,7 +14,7 @@ services:
       POLL_SECONDS: 10
       ADMIN_USER: admin
       ADMIN_PASSWORD: wasserwerte
-      SESSION_SECRET: bitte-unbedingt-aendern
+      SESSION_SECRET: ${SESSION_SECRET:-bitte-unbedingt-aendern}
       # SMTP_HOST: smtp.example.com
       # SMTP_PORT: 587
       # SMTP_USER: dashboard@example.com

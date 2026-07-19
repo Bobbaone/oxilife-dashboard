@@ -9,7 +9,7 @@ import smtplib
 import sqlite3
 import time
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from email.message import EmailMessage
@@ -87,13 +87,21 @@ class ConnectionUpdate(BaseModel):
     oxilife_timeout_seconds: int = Field(default=30, ge=10, le=3600)
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
