@@ -155,6 +155,12 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('session_token',?)", (secrets.token_urlsafe(32),))
+        if setting(conn, "filtration_names_v2") != "1":
+            conn.execute("UPDATE datapoints SET name='Betriebsart Filter',unit='',updated_at=? WHERE lower(path) LIKE '%neopool.filtration.mode'",
+                         (int(time.time()),))
+            conn.execute("UPDATE datapoints SET name='Filterpumpe',unit='',widget_type='status',decimals=0,updated_at=? WHERE lower(path) LIKE '%neopool.filtration.state'",
+                         (int(time.time()),))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('filtration_names_v2','1')")
         # Upgrade only untouched legacy rows. Explicit admin choices remain authoritative.
         for row in conn.execute("SELECT * FROM datapoints").fetchall():
             legacy_name = row["path"].replace(".", " › ").replace("_", " ")
@@ -356,7 +362,7 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         "neopool.hydrolysis.state": "Zustand Hydrolyse",
         "neopool.filtration.state": "Filterpumpe",
         "neopool.filtration.speed": "Geschwindigkeit Pumpe",
-        "neopool.filtration.mode": "Filtermodus",
+        "neopool.filtration.mode": "Betriebsart Filter",
         "neopool.conductivity": "Leitfähigkeit",
         "neopool.temperature": "Wassertemperatur",
     }
@@ -434,12 +440,23 @@ def point_dict(row: sqlite3.Row, include_path: bool = True) -> dict[str, Any]:
         "chart": bool(row["chart"]), "widget_type": row["widget_type"], "scale": row["scale"],
         "decimals": row["decimals"], "min_value": row["min_value"], "max_value": row["max_value"],
         "warning_low": row["warning_low"], "warning_high": row["warning_high"],
-        "alert_low": bool(row["alert_low"]),
+        "alert_low": bool(row["alert_low"]), "semantic": datapoint_semantic(row["path"]),
         "value": value, "raw_value": row["last_value_text"], "last_seen": row["last_seen"],
     }
     if include_path:
         item["path"] = row["path"]
     return item
+
+
+def datapoint_semantic(path: str) -> str | None:
+    lowered = path.lower()
+    if "neopool.filtration.mode" in lowered:
+        return "filtration_mode"
+    if "neopool.filtration.state" in lowered:
+        return "filtration_state"
+    if "neopool.filtration.speed" in lowered:
+        return "filtration_speed"
+    return None
 
 
 def neopool_alarms(payload: Any) -> list[dict[str, str]]:
