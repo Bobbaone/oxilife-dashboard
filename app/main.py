@@ -198,7 +198,7 @@ def init_db() -> None:
         if setting(conn, "binary_tank_switch_v1") != "1":
             # Remove the percentage defaults from the short-lived tank-level implementation.
             conn.execute("""UPDATE datapoints SET unit='',widget_type='status',min_value=NULL,max_value=NULL,
-                            warning_low=NULL,warning_high=NULL,alert_low=0,updated_at=?
+                            warning_low=NULL,warning_high=NULL,alert_low=1,updated_at=?
                             WHERE (lower(path) LIKE '%ph%tank%' OR lower(path) LIKE '%chlor%tank%')
                             AND min_value=10 AND max_value=100 AND warning_low=25 AND warning_high=100""",
                          (int(time.time()),))
@@ -466,6 +466,9 @@ def datapoint_quality_defaults(path: str) -> dict[str, float | bool | None] | No
     limits: tuple[float | None, float | None, float | None, float | None] | None = None
     alert_low = False
 
+    if "neopool" in key and "tank" in key and ("ph" in key or "chlor" in key):
+        return {"min_value": None, "max_value": None, "warning_low": None,
+                "warning_high": None, "alert_low": True}
     if "neopoolphdata" in key or key.endswith("ph"):
         limits = (6.8, 7.6, 7.0, 7.4)
     elif any(word in key for word in ("neopoolredoxdata", "orpdata", "redoxdata")) or key.endswith(("redox", "orp", "rx")):
@@ -578,7 +581,7 @@ def neopool_alarms(payload: Any) -> list[dict[str, str]]:
     return result
 
 
-def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str]]:
+def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]:
     flat = flatten(payload)
     alerts: list[tuple[int, str, float, str]] = []
     with db() as conn:
@@ -610,13 +613,15 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str
             if point["logging"]:
                 conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
                              (point["id"], now, text_value, num_value))
-            low = (point["alert_low"] and num_value is not None and point["warning_low"] is not None
-                   and num_value * point["scale"] < point["warning_low"])
+            tank_switch = datapoint_semantic(path) == "tank_switch"
+            tank_empty = tank_switch and str(value).strip().upper() in {"LEER", "EMPTY", "LOW", "1", "TRUE", "ON"}
+            low = bool(point["alert_low"] and ((num_value is not None and point["warning_low"] is not None
+                       and num_value * point["scale"] < point["warning_low"]) or tank_empty))
             if low:
                 due = not point["alert_active"] or not point["last_alert_at"] or now - point["last_alert_at"] >= ALERT_COOLDOWN_SECONDS
                 conn.execute("UPDATE datapoints SET alert_active=1 WHERE id=?", (point["id"],))
                 if due:
-                    scaled = num_value * point["scale"]
+                    scaled = "LEER" if tank_empty else num_value * point["scale"]
                     alerts.append((point["id"], point["name"], scaled, point["unit"]))
             elif point["alert_active"]:
                 conn.execute("UPDATE datapoints SET alert_active=0 WHERE id=?", (point["id"],))
@@ -625,15 +630,15 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, float, str
     return alerts
 
 
-def send_low_alert(name: str, value: float, unit: str) -> None:
+def send_low_alert(name: str, value: Any, unit: str) -> None:
     if not all((SMTP_HOST, SMTP_FROM, ALERT_EMAIL_TO)):
         raise RuntimeError("SMTP_HOST, SMTP_FROM oder ALERT_EMAIL_TO fehlt")
-    rendered = f"{value:g}{(' ' + unit) if unit else ''}"
+    rendered = (f"{value:g}" if isinstance(value, (int, float)) else str(value)) + ((' ' + unit) if unit else '')
     message = EmailMessage()
     message["Subject"] = f"Oxilife-Warnung: {name} niedrig"
     message["From"] = SMTP_FROM
     message["To"] = ALERT_EMAIL_TO
-    message.set_content(f"Achtung. Füllstand {name} {rendered} niedrig.")
+    message.set_content(f"Achtung. Füllstand {name}: {rendered}.")
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as client:
         client.starttls()
         if SMTP_USER:
@@ -844,7 +849,10 @@ def update_datapoint(point_id: int, settings: DatapointUpdate, request: Request)
     if values["max_value"] is not None and values["warning_high"] is not None and values["warning_high"] > values["max_value"]:
         raise HTTPException(status_code=400, detail="Warn max muss innerhalb von Minimum und Maximum liegen")
     if values["alert_low"] and values["warning_low"] is None:
-        raise HTTPException(status_code=400, detail="Für die E-Mail-Warnung muss Warn min gesetzt sein")
+        with db() as conn:
+            existing = conn.execute("SELECT path FROM datapoints WHERE id=?", (point_id,)).fetchone()
+        if not existing or datapoint_semantic(existing["path"]) != "tank_switch":
+            raise HTTPException(status_code=400, detail="Für die E-Mail-Warnung muss Warn min gesetzt sein")
     fields = list(values)
     with db() as conn:
         cursor = conn.execute(f"UPDATE datapoints SET {','.join(f'{key}=?' for key in fields)},auto_configured=0,updated_at=? WHERE id=?",
