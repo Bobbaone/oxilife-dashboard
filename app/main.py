@@ -10,7 +10,7 @@ import sqlite3
 import time
 import re
 from contextlib import asynccontextmanager, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from email.message import EmailMessage
 from typing import Any
@@ -89,6 +89,14 @@ class FilterTimerUpdate(BaseModel):
     start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     speed: int = Field(default=1, ge=1, le=3)
+
+
+class BackwashScheduleUpdate(BaseModel):
+    automatic: bool = True
+    weekday: int = Field(default=0, ge=0, le=6)
+    start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    repeat_days: int = Field(default=7, ge=1, le=365)
+    duration_seconds: int = Field(default=180, ge=30, le=3600)
 
 
 class ConnectionUpdate(BaseModel):
@@ -1398,6 +1406,83 @@ def backwash_events(request: Request, limit: int = 50):
         total = conn.execute("SELECT COUNT(*) count FROM backwash_events").fetchone()["count"]
         year = conn.execute("SELECT COUNT(*) count FROM backwash_events WHERE started_at>=?", (year_start,)).fetchone()["count"]
     return {"total": total, "year": year, "events": [dict(row) for row in rows]}
+
+
+def command_register_data(result: Any, command: str) -> Any:
+    value = result.get(command, {}).get("Data") if isinstance(result, dict) else None
+    if value is None:
+        raise HTTPException(status_code=502, detail=f"Ungültige {command}-Antwort von Tasmota")
+    return value
+
+
+async def read_backwash_schedule() -> dict[str, Any]:
+    config = command_register_data(await send_command("/cm?cmnd=NPRead%200x4E8%2C3"), "NPRead")
+    start_raw = command_register_data(await send_command("/cm?cmnd=NPReadL%200x4EB"), "NPReadL")
+    timing = command_register_data(await send_command("/cm?cmnd=NPRead%200x4ED%2C3"), "NPRead")
+    if not isinstance(config, list) or len(config) < 3 or not isinstance(timing, list) or len(timing) < 3:
+        raise HTTPException(status_code=502, detail="Unvollständige Rückspülungsdaten von Oxilife")
+    enabled, mode, gpio = (register_int(value) for value in config[:3])
+    start_timestamp = register_int(start_raw)
+    period_minutes, duration, remaining = (register_int(value) for value in timing[:3])
+    start = datetime.fromtimestamp(start_timestamp, tz=timezone.utc)
+    next_timestamp = None
+    if mode == 1 and period_minutes > 0:
+        period_seconds = period_minutes * 60
+        now = int(time.time())
+        next_timestamp = start_timestamp if start_timestamp > now else (
+            start_timestamp + (((now - start_timestamp) // period_seconds) + 1) * period_seconds
+        )
+    next_label = None
+    if next_timestamp:
+        next_run = datetime.fromtimestamp(next_timestamp, tz=timezone.utc)
+        weekdays = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+        next_label = f"{weekdays[next_run.weekday()]}, {next_run:%d.%m.%Y, %H:%M} Uhr"
+    return {
+        "available": enabled == 1, "feature_mode": enabled, "automatic": mode == 1,
+        "timer_mode": mode, "gpio": gpio, "weekday": start.weekday(),
+        "start": start.strftime("%H:%M"), "start_timestamp": start_timestamp,
+        "repeat_days": max(1, period_minutes // 1440) if period_minutes else 7,
+        "period_minutes": period_minutes, "duration_seconds": duration,
+        "remaining_seconds": remaining, "next_timestamp": next_timestamp, "next_label": next_label,
+    }
+
+
+@app.get("/api/admin/backwash-schedule")
+async def backwash_schedule(request: Request):
+    require_admin(request)
+    return await read_backwash_schedule()
+
+
+@app.put("/api/admin/backwash-schedule")
+async def update_backwash_schedule(update: BackwashScheduleUpdate, request: Request):
+    require_admin(request)
+    current = await read_backwash_schedule()
+    if not current["available"]:
+        raise HTTPException(status_code=409, detail=(
+            "Die automatische Rückspülung/Besgo-Funktion ist in Oxilife nicht eingerichtet. "
+            "Sie wird aus Sicherheitsgründen nicht automatisch aktiviert."
+        ))
+    hours, minutes = (int(part) for part in update.start.split(":"))
+    now = datetime.now(timezone.utc)
+    start = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+    start += timedelta(days=(update.weekday - start.weekday()) % 7)
+    if start <= now:
+        start += timedelta(days=7)
+    start_timestamp = int(start.timestamp())
+    period_minutes = update.repeat_days * 1440
+    await send_command(f"/cm?cmnd=NPWrite%200x4E9%2C{1 if update.automatic else 0}")
+    await send_command(f"/cm?cmnd=NPWriteL%200x4EB%2C{start_timestamp}")
+    await send_command(f"/cm?cmnd=NPWrite%200x4ED%2C{period_minutes}")
+    await send_command(f"/cm?cmnd=NPWrite%200x4EE%2C{update.duration_seconds}")
+    await send_command("/cm?cmnd=NPExec")
+    await send_command("/cm?cmnd=NPSave")
+    await asyncio.sleep(1)
+    actual = await read_backwash_schedule()
+    expected = {"automatic": update.automatic, "weekday": update.weekday, "start": update.start,
+                "repeat_days": update.repeat_days, "duration_seconds": update.duration_seconds}
+    if any(actual[key] != value for key, value in expected.items()):
+        raise HTTPException(status_code=409, detail="Gespeichert, aber die Oxilife-Rückmeldung weicht ab.")
+    return {"ok": True, "verified": True, **actual}
 
 
 def clock_seconds(value: str) -> int:

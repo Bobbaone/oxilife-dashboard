@@ -19,8 +19,43 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   loadBackwashEvents();
+  loadBackwashSchedule();
   setInterval(loadBackwashEvents, 30000);
 });
+
+async function loadBackwashSchedule() {
+  const info = $("backwashScheduleInfo");
+  try {
+    const data = await api("/api/admin/backwash-schedule");
+    $("backwashAutomatic").checked = data.automatic;
+    $("backwashWeekday").value = String(data.weekday);
+    $("backwashStart").value = data.start;
+    $("backwashRepeat").value = String(data.repeat_days);
+    $("backwashDuration").value = data.duration_seconds;
+    const next = data.next_label ? ` · nächste Durchführung ${data.next_label}` : "";
+    info.textContent = data.available
+      ? `Aktuell: ${data.automatic ? "Automatisch" : "Aus"} · alle ${data.repeat_days} Tag(e) · ${data.duration_seconds} Sekunden${next}${data.remaining_seconds ? ` · läuft noch ${data.remaining_seconds} Sekunden` : ""}`
+      : "Die Besgo-Rückspülungsfunktion ist in Oxilife nicht eingerichtet.";
+  } catch (error) {
+    info.textContent = error.message;
+  }
+}
+
+async function saveBackwashSchedule() {
+  const info = $("backwashScheduleInfo");
+  info.textContent = "Rückspülungszeitplan wird gespeichert und geprüft …";
+  try {
+    const body = {automatic: $("backwashAutomatic").checked,
+      weekday: Number($("backwashWeekday").value), start: $("backwashStart").value,
+      repeat_days: Number($("backwashRepeat").value),
+      duration_seconds: Number($("backwashDuration").value)};
+    await api("/api/admin/backwash-schedule", {method: "PUT", body: JSON.stringify(body)});
+    info.textContent = "Zeitplan von Oxilife bestätigt.";
+    await loadBackwashSchedule();
+  } catch (error) {
+    info.textContent = error.message;
+  }
+}
 
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined) return "läuft";
