@@ -847,6 +847,27 @@ def timer_clock(seconds: int) -> str:
     return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
 
 
+def next_filter_start(values: dict[str, str], now: datetime | None = None) -> dict[str, str] | None:
+    """Return the next daily filtration start using the server's local timezone."""
+    reference = (now or datetime.now().astimezone()).replace(second=0, microsecond=0)
+    candidates: list[datetime] = []
+    for value in values.values():
+        try:
+            start = value.split("–", 1)[0]
+            hours, minutes = (int(part) for part in start.split(":"))
+            candidate = reference.replace(hour=hours, minute=minutes)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if candidate < reference:
+            candidate += timedelta(days=1)
+        candidates.append(candidate)
+    if not candidates:
+        return None
+    candidate = min(candidates)
+    weekdays = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+    return {"at": candidate.isoformat(), "label": f"{weekdays[candidate.weekday()]}, {candidate:%H:%M} Uhr"}
+
+
 def register_int(value: Any) -> int:
     """Decode NeoPool register results in either decimal or the default hex format."""
     if isinstance(value, str):
@@ -1006,6 +1027,7 @@ def status():
     filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
     return {"online": latest["online"], "updated_at": latest["updated_at"], "error": latest["error"],
             "server_time": datetime.now().astimezone().isoformat(),
+            "next_filter_start": next_filter_start(filter_timer_cache["values"]),
             "filtration": {
                 "state": filtration.get("State") if isinstance(filtration, dict) else None,
                 "mode": filtration.get("Mode") if isinstance(filtration, dict) else None,
