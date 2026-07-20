@@ -172,9 +172,19 @@ def init_db() -> None:
                 duration_seconds INTEGER,
                 source TEXT NOT NULL DEFAULT 'Oxilife/Automatik'
             );
+            CREATE TABLE IF NOT EXISTS filter_run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                last_seen_at INTEGER NOT NULL,
+                duration_seconds INTEGER,
+                mode INTEGER,
+                speed INTEGER
+            );
             CREATE INDEX IF NOT EXISTS idx_readings_point_ts ON readings(datapoint_id, ts);
             CREATE INDEX IF NOT EXISTS idx_poll_events_ts ON poll_events(ts);
             CREATE INDEX IF NOT EXISTS idx_backwash_started_at ON backwash_events(started_at);
+            CREATE INDEX IF NOT EXISTS idx_filter_run_started_at ON filter_run_events(started_at);
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -854,6 +864,35 @@ def track_backwash(payload: dict[str, Any], now: int) -> None:
                             WHERE id=?""", (now, now, max(0, now - active["started_at"]), active["id"]))
 
 
+def track_filter_runtime(payload: dict[str, Any], now: int) -> None:
+    """Record confirmed pump-on intervals without counting long telemetry gaps."""
+    pool = neopool_payload(payload)
+    filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
+    state = filtration.get("State") if isinstance(filtration, dict) else None
+    if state is None:
+        return
+    running = str(state) == "1"
+    mode = filtration.get("Mode")
+    speed = filtration.get("Speed")
+    max_gap = max(60, POLL_SECONDS * 3)
+    with db() as conn:
+        active = conn.execute("SELECT * FROM filter_run_events WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        if active and now - active["last_seen_at"] > max_gap:
+            conn.execute("""UPDATE filter_run_events SET ended_at=last_seen_at,
+                            duration_seconds=MAX(0,last_seen_at-started_at) WHERE id=?""", (active["id"],))
+            active = None
+        if running:
+            if active:
+                conn.execute("UPDATE filter_run_events SET last_seen_at=?,mode=?,speed=? WHERE id=?",
+                             (now, mode, speed, active["id"]))
+            else:
+                conn.execute("""INSERT INTO filter_run_events(started_at,last_seen_at,mode,speed)
+                                VALUES(?,?,?,?)""", (now, now, mode, speed))
+        elif active:
+            conn.execute("""UPDATE filter_run_events SET ended_at=?,last_seen_at=?,duration_seconds=?
+                            WHERE id=?""", (now, now, max(0, now - active["started_at"]), active["id"]))
+
+
 async def _poll_once() -> None:
     now = int(time.time())
     if not TASMOTA_BASE_URL:
@@ -868,6 +907,7 @@ async def _poll_once() -> None:
         if not isinstance(payload, dict):
             raise ValueError("Tasmota-Antwort ist kein JSON-Objekt")
         track_backwash(payload, now)
+        track_filter_runtime(payload, now)
         alerts = ingest(payload, now)
         alert_error = None
         for point_id, name, value, unit in alerts:
@@ -1215,6 +1255,61 @@ def history(request: Request, hours: int = 24, point_ids: str = ""):
                 scaled_stats["min"], scaled_stats["max"] = scaled_stats["max"], scaled_stats["min"]
             series.append({"datapoint": point_dict(point), "values": values, "stats": scaled_stats})
     return {"hours": hours, "bucket_seconds": bucket, "series": series}
+
+
+def month_start(value: datetime, offset: int = 0) -> datetime:
+    month_index = value.year * 12 + value.month - 1 + offset
+    return value.replace(year=month_index // 12, month=month_index % 12 + 1,
+                         day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def filter_runtime_seconds(rows: list[sqlite3.Row], start_ts: int, end_ts: int, now: int) -> int:
+    total = 0
+    max_gap = max(60, POLL_SECONDS * 3)
+    for row in rows:
+        effective_end = row["ended_at"]
+        if effective_end is None:
+            effective_end = now if now - row["last_seen_at"] <= max_gap else row["last_seen_at"]
+        total += max(0, min(effective_end, end_ts) - max(row["started_at"], start_ts))
+    return total
+
+
+@app.get("/api/admin/filter-runtime")
+def filter_runtime(request: Request):
+    require_admin(request)
+    now = int(time.time())
+    local_now = datetime.now().astimezone()
+    today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week = today - timedelta(days=today.weekday())
+    month = month_start(local_now)
+    year = month.replace(month=1)
+    with db() as conn:
+        rows = conn.execute("""SELECT * FROM filter_run_events
+                             WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?
+                             ORDER BY started_at""", (now + 1, 0)).fetchall()
+    bounds = {"today": int(today.timestamp()), "week": int(week.timestamp()),
+              "month": int(month.timestamp()), "year": int(year.timestamp())}
+    summary = {key: filter_runtime_seconds(rows, start, now, now) for key, start in bounds.items()}
+    summary["total"] = filter_runtime_seconds(rows, 0, now, now)
+    monthly = []
+    for offset in range(-11, 1):
+        start = month_start(local_now, offset)
+        end = month_start(local_now, offset + 1)
+        monthly.append({"key": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"),
+                        "seconds": filter_runtime_seconds(rows, int(start.timestamp()),
+                                                          min(now, int(end.timestamp())), now)})
+    recent = []
+    max_gap = max(60, POLL_SECONDS * 3)
+    for row in reversed(rows[-20:]):
+        effective_end = row["ended_at"]
+        active = effective_end is None and now - row["last_seen_at"] <= max_gap
+        if effective_end is None:
+            effective_end = now if active else row["last_seen_at"]
+        recent.append({"started_at": row["started_at"], "ended_at": None if active else effective_end,
+                       "duration_seconds": max(0, effective_end - row["started_at"]),
+                       "mode": row["mode"], "speed": row["speed"], "active": active})
+    return {"summary": summary, "monthly": monthly, "runs": len(rows),
+            "recent": recent, "updated_at": now}
 
 
 @app.get("/api/admin/reports")

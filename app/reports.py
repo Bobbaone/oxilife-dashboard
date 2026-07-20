@@ -35,6 +35,9 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                         (start_ts, end_ts)).fetchone()
     backwashes = conn.execute("""SELECT * FROM backwash_events WHERE started_at>=? AND started_at<?
                                ORDER BY started_at""", (start_ts, end_ts)).fetchall()
+    filter_runs = conn.execute("""SELECT * FROM filter_run_events
+                               WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?""",
+                               (end_ts, start_ts)).fetchall()
     conn.close()
     start, end = datetime.fromtimestamp(start_ts).astimezone(), datetime.fromtimestamp(end_ts - 1).astimezone()
     styles = getSampleStyleSheet()
@@ -48,11 +51,15 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                             topMargin=15*mm, bottomMargin=15*mm, title="Oxilife Wochenbericht")
     total, online = int(poll["total"] or 0), int(poll["online"] or 0)
     availability = online / total * 100 if total else 0
+    runtime_seconds = sum(max(0, min(row["ended_at"] or row["last_seen_at"], end_ts) -
+                                  max(row["started_at"], start_ts)) for row in filter_runs)
+    runtime_hours, runtime_minutes = divmod(runtime_seconds // 60, 60)
     story = [Paragraph("OXILIFE WOCHENBERICHT", styles["ReportTitle"]),
              Paragraph(f"{start:%d.%m.%Y} bis {end:%d.%m.%Y}", styles["Sub"]),
              Paragraph("Zusammenfassung", styles["Section"]),
              Table([["Erfasste Datenpunkte", str(len(points))], ["Abfragen", str(total)],
                     ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")],
+                    ["Pumpenlaufzeit", f"{runtime_hours} Std. {runtime_minutes} Min."],
                     ["Rückspülungen", str(len(backwashes))]], colWidths=[65*mm, 45*mm],
                    style=TableStyle([("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eaf7fb")),
                                      ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#c8dce4")),
