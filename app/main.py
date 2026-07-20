@@ -156,8 +156,17 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
                 online INTEGER NOT NULL, raw_json TEXT NOT NULL, error TEXT
             );
+            CREATE TABLE IF NOT EXISTS backwash_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at INTEGER NOT NULL,
+                ended_at INTEGER,
+                last_seen_at INTEGER NOT NULL,
+                duration_seconds INTEGER,
+                source TEXT NOT NULL DEFAULT 'Oxilife/Automatik'
+            );
             CREATE INDEX IF NOT EXISTS idx_readings_point_ts ON readings(datapoint_id, ts);
             CREATE INDEX IF NOT EXISTS idx_poll_events_ts ON poll_events(ts);
+            CREATE INDEX IF NOT EXISTS idx_backwash_started_at ON backwash_events(started_at);
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -813,6 +822,30 @@ def send_low_alert(name: str, value: Any, unit: str) -> None:
         client.send_message(message)
 
 
+def track_backwash(payload: dict[str, Any], now: int) -> None:
+    """Persist confirmed transitions into and out of NeoPool backwash mode 13."""
+    pool = neopool_payload(payload)
+    filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
+    mode = filtration.get("Mode") if isinstance(filtration, dict) else None
+    if mode is None:
+        return
+    with db() as conn:
+        active = conn.execute("SELECT * FROM backwash_events WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        if str(mode) == "13":
+            if active:
+                conn.execute("UPDATE backwash_events SET last_seen_at=? WHERE id=?", (now, active["id"]))
+                return
+            requested_at = setting(conn, "backwash_requested_at")
+            dashboard_request = requested_at.isdigit() and now - int(requested_at) <= 120
+            source = "Dashboard" if dashboard_request else "Oxilife/Automatik"
+            conn.execute("""INSERT INTO backwash_events(started_at,last_seen_at,source)
+                            VALUES(?,?,?)""", (now, now, source))
+            conn.execute("DELETE FROM app_settings WHERE key='backwash_requested_at'")
+        elif active:
+            conn.execute("""UPDATE backwash_events SET ended_at=?,last_seen_at=?,duration_seconds=?
+                            WHERE id=?""", (now, now, max(0, now - active["started_at"]), active["id"]))
+
+
 async def _poll_once() -> None:
     now = int(time.time())
     if not TASMOTA_BASE_URL:
@@ -826,6 +859,7 @@ async def _poll_once() -> None:
             await add_filter_timers(client, payload, now)
         if not isinstance(payload, dict):
             raise ValueError("Tasmota-Antwort ist kein JSON-Objekt")
+        track_backwash(payload, now)
         alerts = ingest(payload, now)
         alert_error = None
         for point_id, name, value, unit in alerts:
@@ -1353,6 +1387,19 @@ def filter_timers(request: Request):
             "updated_at": filter_timer_cache["fetched_at"]}
 
 
+@app.get("/api/admin/backwash-events")
+def backwash_events(request: Request, limit: int = 50):
+    require_admin(request)
+    limit = max(1, min(limit, 200))
+    now = datetime.now().astimezone()
+    year_start = int(now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0).timestamp())
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM backwash_events ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+        total = conn.execute("SELECT COUNT(*) count FROM backwash_events").fetchone()["count"]
+        year = conn.execute("SELECT COUNT(*) count FROM backwash_events WHERE started_at>=?", (year_start,)).fetchone()["count"]
+    return {"total": total, "year": year, "events": [dict(row) for row in rows]}
+
+
 def clock_seconds(value: str) -> int:
     hours, minutes = (int(part) for part in value.split(":"))
     return hours * 3600 + minutes * 60
@@ -1404,7 +1451,16 @@ async def backwash(request: Request):
     require_admin(request)
     body = await request.json()
     if body.get("confirm") != "RÜCKSPÜLEN": raise HTTPException(status_code=400, detail="Bestätigung fehlt")
-    return {"ok": True, "result": await send_command(COMMANDS["backwash"])}
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('backwash_requested_at',?)",
+                     (str(int(time.time())),))
+    try:
+        result = await send_command(COMMANDS["backwash"])
+    except Exception:
+        with db() as conn:
+            conn.execute("DELETE FROM app_settings WHERE key='backwash_requested_at'")
+        raise
+    return {"ok": True, "result": result}
 
 
 @app.exception_handler(HTTPException)
