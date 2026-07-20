@@ -33,6 +33,8 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                           (start_ts, end_ts, start_ts, end_ts, start_ts, end_ts)).fetchall()
     poll = conn.execute("SELECT COUNT(*) total,SUM(online) online FROM poll_events WHERE ts>=? AND ts<?",
                         (start_ts, end_ts)).fetchone()
+    backwashes = conn.execute("""SELECT * FROM backwash_events WHERE started_at>=? AND started_at<?
+                               ORDER BY started_at""", (start_ts, end_ts)).fetchall()
     conn.close()
     start, end = datetime.fromtimestamp(start_ts).astimezone(), datetime.fromtimestamp(end_ts - 1).astimezone()
     styles = getSampleStyleSheet()
@@ -50,7 +52,8 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
              Paragraph(f"{start:%d.%m.%Y} bis {end:%d.%m.%Y}", styles["Sub"]),
              Paragraph("Zusammenfassung", styles["Section"]),
              Table([["Erfasste Datenpunkte", str(len(points))], ["Abfragen", str(total)],
-                    ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")]], colWidths=[65*mm, 45*mm],
+                    ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")],
+                    ["Rückspülungen", str(len(backwashes))]], colWidths=[65*mm, 45*mm],
                    style=TableStyle([("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eaf7fb")),
                                      ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#c8dce4")),
                                      ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
@@ -95,6 +98,22 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
         story.append(usage)
     else:
         story.append(Paragraph("Kein Verbrauchszähler wurde von Oxilife/Tasmota geliefert. Messwerte wie Salzgehalt oder Chlorwert allein erlauben keine zuverlässige Berechnung der verbrauchten Menge.", styles["BodyText"]))
+    story += [Spacer(1, 5*mm), Paragraph("Rückspülungen", styles["Section"])]
+    if backwashes:
+        backwash_rows = [["Start", "Dauer", "Auslöser"]]
+        for event in backwashes:
+            started = datetime.fromtimestamp(event["started_at"]).astimezone().strftime("%d.%m.%Y %H:%M")
+            duration = event["duration_seconds"]
+            rendered_duration = "läuft" if duration is None else f"{duration // 60} Min. {duration % 60} Sek."
+            backwash_rows.append([started, rendered_duration, event["source"]])
+        backwash_table = Table(backwash_rows, repeatRows=1, colWidths=[60*mm, 45*mm, 55*mm])
+        backwash_table.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), ACCENT),
+                                            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                                            ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#b8d5df")),
+                                            ("PADDING", (0, 0), (-1, -1), 6)]))
+        story.append(backwash_table)
+    else:
+        story.append(Paragraph("In dieser Kalenderwoche wurde keine Rückspülung erkannt.", styles["BodyText"]))
     story += [Spacer(1, 7*mm), Paragraph("Automatisch erstellt vom lokalen Oxilife Dashboard.", styles["Sub"])]
 
     def footer(canvas, document):
