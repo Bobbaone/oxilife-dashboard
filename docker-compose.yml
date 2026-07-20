@@ -26,6 +26,7 @@ services:
       FILTER_SPEED_COMMAND_1: /cm?cmnd=NPFiltrationspeed%201
       FILTER_SPEED_COMMAND_2: /cm?cmnd=NPFiltrationspeed%202
       FILTER_SPEED_COMMAND_3: /cm?cmnd=NPFiltrationspeed%203
+      FILTER_OFF_COMMAND: /cm?cmnd=NPFiltration%200
       BACKWASH_COMMAND: /cm?cmnd=NPFiltrationmode%2013
     volumes:
       - oxilife-data:/app/data

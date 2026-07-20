@@ -44,6 +44,7 @@ WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
+    "0": os.getenv("FILTER_OFF_COMMAND", "/cm?cmnd=NPFiltration%200"),
     "1": os.getenv("FILTER_SPEED_COMMAND_1", "/cm?cmnd=NPFiltrationspeed%201"),
     "2": os.getenv("FILTER_SPEED_COMMAND_2", "/cm?cmnd=NPFiltrationspeed%202"),
     "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltrationspeed%203"),
@@ -1015,6 +1016,12 @@ def statistics_page(): return FileResponse(BASE / "static" / "statistics.html")
 def pump_page(): return FileResponse(BASE / "static" / "pump.html")
 
 
+@app.get("/pump-controls.js", include_in_schema=False)
+def pump_controls_script():
+    return FileResponse(BASE / "static" / "pump-controls.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/status")
 def status():
     with db() as conn:
@@ -1298,7 +1305,7 @@ def neopool_payload(payload: Any) -> dict[str, Any] | None:
 @app.post("/api/filter/{speed}")
 async def filter_speed(speed: str, request: Request):
     require_admin(request)
-    if speed not in ("1", "2", "3"): raise HTTPException(status_code=400, detail="Ungültige Filterstufe")
+    if speed not in ("0", "1", "2", "3"): raise HTTPException(status_code=400, detail="Ungültige Filterstufe")
     result = await send_command(COMMANDS[speed])
     actual = None
     for _ in range(8):
@@ -1308,8 +1315,14 @@ async def filter_speed(speed: str, request: Request):
         filtration = pool.get("Filtration", {}) if pool else {}
         actual = filtration.get("Speed") if isinstance(filtration, dict) else None
         state = filtration.get("State") if isinstance(filtration, dict) else None
+        if speed == "0" and str(state) == "0":
+            return {"ok": True, "speed": 0, "state": 0, "verified": True, "result": result}
         if str(actual) == speed:
             return {"ok": True, "speed": int(speed), "state": int(state or 0), "verified": True, "result": result}
+    if speed == "0":
+        raise HTTPException(status_code=409, detail=(
+            f"Tasmota hat den Ausschaltbefehl erhalten, aber Oxilife meldet weiterhin Filterzustand {state}."
+        ))
     raise HTTPException(status_code=409, detail=(
         f"Tasmota hat den Befehl erhalten, aber Oxilife meldet weiterhin Pumpenstufe {actual}. "
         "Die laufende Filtersteuerung hat den Befehl nicht übernommen."
