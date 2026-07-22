@@ -12,7 +12,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 ACCENT = colors.HexColor("#20bde9")
 DARK = colors.HexColor("#0d2632")
 MUTED = colors.HexColor("#607d89")
-DEFAULT_PUMP_WATTS = {1: 200, 2: round(200 * (2000 / 1700) ** 3), 3: round(200 * (3000 / 1700) ** 3)}
+DEFAULT_PUMP_WATTS = {1: 212, 2: 343, 3: 1134}
 
 
 def _number(value, decimals=2):

@@ -31,9 +31,9 @@ STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
 DEFAULT_PUMP_POWER_PROFILE = {
-    1: {"rpm": 1700, "watts": 200, "measured": True},
-    2: {"rpm": 2000, "watts": round(200 * (2000 / 1700) ** 3), "measured": False},
-    3: {"rpm": 3000, "watts": round(200 * (3000 / 1700) ** 3), "measured": False},
+    1: {"rpm": 1700, "watts": 212, "measured": True},
+    2: {"rpm": 2000, "watts": 343, "measured": True},
+    3: {"rpm": 3000, "watts": 1134, "measured": True},
 }
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "wasserwerte")
@@ -225,6 +225,13 @@ def init_db() -> None:
                          (f"pump_stage_{speed}_rpm", str(profile["rpm"])))
             conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)",
                          (f"pump_stage_{speed}_watts", str(profile["watts"])))
+        if setting(conn, "pump_power_exact_v1") != "1":
+            # Upgrade only the former bundled estimates. User-defined pump profiles stay untouched.
+            for speed, old_watts in {1: 200, 2: 326, 3: 1099}.items():
+                conn.execute("UPDATE app_settings SET value=? WHERE key=? AND value=?",
+                             (str(DEFAULT_PUMP_POWER_PROFILE[speed]["watts"]),
+                              f"pump_stage_{speed}_watts", str(old_watts)))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('pump_power_exact_v1','1')")
         if setting(conn, "filtration_names_v2") != "1":
             conn.execute("UPDATE datapoints SET name='Betriebsart Filter',unit='',updated_at=? WHERE lower(path) LIKE '%neopool.filtration.mode'",
                          (int(time.time()),))
