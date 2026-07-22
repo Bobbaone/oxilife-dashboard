@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+import ipaddress
 import os
 import secrets
 import smtplib
@@ -88,6 +89,10 @@ class PasswordChange(BaseModel):
 
 class WeatherUpdate(BaseModel):
     postal_code: str = Field(pattern=r"^\d{5}$")
+
+
+class SolarUpdate(BaseModel):
+    ip_address: str = Field(min_length=7, max_length=45)
 
 
 class FilterTimerUpdate(BaseModel):
@@ -503,6 +508,48 @@ async def current_weather(force: bool = False) -> dict[str, Any]:
             if weather_cache["data"]:
                 return {**weather_cache["data"], "stale": True, "error": str(exc)}
             return {"enabled": True, **location, "stale": True, "error": f"Wetterdaten nicht verfügbar: {exc}"}
+
+
+def validated_local_ip(value: str) -> str:
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Bitte eine gültige IP-Adresse eingeben") from exc
+    if not address.is_private:
+        raise HTTPException(status_code=400, detail="Der EZ1 muss eine lokale, private IP-Adresse verwenden")
+    return str(address)
+
+
+async def read_ez1(ip_address: str) -> dict[str, Any]:
+    base_url = f"http://{validated_local_ip(ip_address)}:8050"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            output_response, info_response, power_response, alarm_response = await asyncio.gather(
+                client.get(base_url + "/getOutputData"), client.get(base_url + "/getDeviceInfo"),
+                client.get(base_url + "/getMaxPower"), client.get(base_url + "/getAlarm"),
+            )
+            for response in (output_response, info_response, power_response, alarm_response):
+                response.raise_for_status()
+            output, info = output_response.json(), info_response.json()
+            power, alarm = power_response.json(), alarm_response.json()
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"EZ1 nicht erreichbar: {exc}") from exc
+    if output.get("message") != "SUCCESS":
+        raise HTTPException(status_code=502, detail="Der EZ1 hat keine gültigen Leistungsdaten geliefert")
+    values = output.get("data", {})
+    alarms = alarm.get("data", {})
+    return {
+        "online": True, "updated_at": int(time.time()), "device_id": output.get("deviceId"),
+        "device": info.get("data", {}), "maximum_power": int(power.get("data", {}).get("maxPower", 0) or 0),
+        "input_1": {"power_w": float(values.get("p1", 0) or 0), "today_kwh": float(values.get("e1", 0) or 0),
+                    "total_kwh": float(values.get("te1", 0) or 0)},
+        "input_2": {"power_w": float(values.get("p2", 0) or 0), "today_kwh": float(values.get("e2", 0) or 0),
+                    "total_kwh": float(values.get("te2", 0) or 0)},
+        "total": {"power_w": float(values.get("p1", 0) or 0) + float(values.get("p2", 0) or 0),
+                  "today_kwh": float(values.get("e1", 0) or 0) + float(values.get("e2", 0) or 0),
+                  "total_kwh": float(values.get("te1", 0) or 0) + float(values.get("te2", 0) or 0)},
+        "alarms": alarms, "alarm_active": any(str(value) not in {"0", ""} for value in alarms.values()),
+    }
 
 
 def flatten(data: Any, prefix: str = "") -> dict[str, Any]:
@@ -1234,6 +1281,12 @@ def statistics_script():
                         headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/solar-preview")
+def solar_preview_page():
+    return FileResponse(BASE / "static" / "solar-preview.html", media_type="text/html",
+                        headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
 @app.get("/pump")
 def pump_page():
     content = (BASE / "static" / "pump.html").read_text(encoding="utf-8")
@@ -1301,6 +1354,26 @@ def alert_config(request: Request):
 def admin_weather(request: Request):
     require_admin(request)
     return weather_location() or {"postal_code": "", "city": "", "enabled": False}
+
+
+@app.get("/api/admin/solar-preview")
+async def solar_preview(request: Request):
+    require_admin(request)
+    with db() as conn:
+        ip_address = setting(conn, "ez1_ip", "")
+    if not ip_address:
+        return {"configured": False, "ip_address": ""}
+    return {"configured": True, "ip_address": ip_address, "solar": await read_ez1(ip_address)}
+
+
+@app.put("/api/admin/solar-preview")
+async def update_solar_preview(body: SolarUpdate, request: Request):
+    require_admin(request)
+    ip_address = validated_local_ip(body.ip_address)
+    solar = await read_ez1(ip_address)
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('ez1_ip',?)", (ip_address,))
+    return {"configured": True, "ip_address": ip_address, "solar": solar}
 
 
 @app.get("/api/admin/connection")
