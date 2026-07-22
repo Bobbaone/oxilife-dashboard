@@ -12,6 +12,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 ACCENT = colors.HexColor("#20bde9")
 DARK = colors.HexColor("#0d2632")
 MUTED = colors.HexColor("#607d89")
+PUMP_WATTS = {1: 200, 2: round(200 * (2000 / 1700) ** 3), 3: round(200 * (3000 / 1700) ** 3)}
 
 
 def _number(value, decimals=2):
@@ -53,6 +54,9 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
     availability = online / total * 100 if total else 0
     runtime_seconds = sum(max(0, min(row["ended_at"] or row["last_seen_at"], end_ts) -
                                   max(row["started_at"], start_ts)) for row in filter_runs)
+    energy_kwh = sum(max(0, min(row["ended_at"] or row["last_seen_at"], end_ts) -
+                             max(row["started_at"], start_ts)) * PUMP_WATTS.get(row["speed"], 0) / 3_600_000
+                     for row in filter_runs)
     runtime_hours, runtime_minutes = divmod(runtime_seconds // 60, 60)
     story = [Paragraph("OXILIFE WOCHENBERICHT", styles["ReportTitle"]),
              Paragraph(f"{start:%d.%m.%Y} bis {end:%d.%m.%Y}", styles["Sub"]),
@@ -60,6 +64,7 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
              Table([["Erfasste Datenpunkte", str(len(points))], ["Abfragen", str(total)],
                     ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")],
                     ["Pumpenlaufzeit", f"{runtime_hours} Std. {runtime_minutes} Min."],
+                    ["Pumpenenergie (geschätzt)", f"{energy_kwh:.2f} kWh".replace(".", ",")],
                     ["Rückspülungen", str(len(backwashes))]], colWidths=[65*mm, 45*mm],
                    style=TableStyle([("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eaf7fb")),
                                      ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#c8dce4")),

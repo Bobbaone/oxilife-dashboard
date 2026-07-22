@@ -30,6 +30,11 @@ TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "ESP32").strip() or "ES
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
+PUMP_POWER_PROFILE = {
+    1: {"rpm": 1700, "watts": 200, "measured": True},
+    2: {"rpm": 2000, "watts": round(200 * (2000 / 1700) ** 3), "measured": False},
+    3: {"rpm": 3000, "watts": round(200 * (3000 / 1700) ** 3), "measured": False},
+}
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "wasserwerte")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "change-me")
@@ -883,8 +888,14 @@ def track_filter_runtime(payload: dict[str, Any], now: int) -> None:
             active = None
         if running:
             if active:
-                conn.execute("UPDATE filter_run_events SET last_seen_at=?,mode=?,speed=? WHERE id=?",
-                             (now, mode, speed, active["id"]))
+                changed = str(active["speed"]) != str(speed) or str(active["mode"]) != str(mode)
+                if changed:
+                    conn.execute("""UPDATE filter_run_events SET ended_at=?,last_seen_at=?,duration_seconds=?
+                                    WHERE id=?""", (now, now, max(0, now - active["started_at"]), active["id"]))
+                    conn.execute("""INSERT INTO filter_run_events(started_at,last_seen_at,mode,speed)
+                                    VALUES(?,?,?,?)""", (now, now, mode, speed))
+                else:
+                    conn.execute("UPDATE filter_run_events SET last_seen_at=? WHERE id=?", (now, active["id"]))
             else:
                 conn.execute("""INSERT INTO filter_run_events(started_at,last_seen_at,mode,speed)
                                 VALUES(?,?,?,?)""", (now, now, mode, speed))
@@ -1100,6 +1111,12 @@ def admin(): return FileResponse(BASE / "static" / "admin.html")
 def statistics_page(): return FileResponse(BASE / "static" / "statistics.html")
 
 
+@app.get("/statistics.js", include_in_schema=False)
+def statistics_script():
+    return FileResponse(BASE / "static" / "statistics.js", media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/pump")
 def pump_page(): return FileResponse(BASE / "static" / "pump.html")
 
@@ -1280,6 +1297,25 @@ def filter_runtime_seconds(rows: list[sqlite3.Row], start_ts: int, end_ts: int, 
     return total
 
 
+def filter_energy_kwh(rows: list[sqlite3.Row], start_ts: int, end_ts: int, now: int) -> tuple[float, dict[int, float]]:
+    by_speed = {speed: 0.0 for speed in PUMP_POWER_PROFILE}
+    max_gap = max(60, POLL_SECONDS * 3)
+    for row in rows:
+        try:
+            speed = int(row["speed"])
+        except (TypeError, ValueError):
+            continue
+        profile = PUMP_POWER_PROFILE.get(speed)
+        if not profile:
+            continue
+        effective_end = row["ended_at"]
+        if effective_end is None:
+            effective_end = now if now - row["last_seen_at"] <= max_gap else row["last_seen_at"]
+        seconds = max(0, min(effective_end, end_ts) - max(row["started_at"], start_ts))
+        by_speed[speed] += seconds * profile["watts"] / 3_600_000
+    return sum(by_speed.values()), by_speed
+
+
 @app.get("/api/admin/filter-runtime")
 def filter_runtime(request: Request):
     require_admin(request)
@@ -1297,13 +1333,16 @@ def filter_runtime(request: Request):
               "month": int(month.timestamp()), "year": int(year.timestamp())}
     summary = {key: filter_runtime_seconds(rows, start, now, now) for key, start in bounds.items()}
     summary["total"] = filter_runtime_seconds(rows, 0, now, now)
+    energy = {key: filter_energy_kwh(rows, start, now, now)[0] for key, start in bounds.items()}
+    energy["total"], energy_by_speed = filter_energy_kwh(rows, 0, now, now)
     monthly = []
     for offset in range(-11, 1):
         start = month_start(local_now, offset)
         end = month_start(local_now, offset + 1)
+        start_ts, end_ts = int(start.timestamp()), min(now, int(end.timestamp()))
         monthly.append({"key": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"),
-                        "seconds": filter_runtime_seconds(rows, int(start.timestamp()),
-                                                          min(now, int(end.timestamp())), now)})
+                        "seconds": filter_runtime_seconds(rows, start_ts, end_ts, now),
+                        "kwh": filter_energy_kwh(rows, start_ts, end_ts, now)[0]})
     recent = []
     max_gap = max(60, POLL_SECONDS * 3)
     for row in reversed(rows[-20:]):
@@ -1314,8 +1353,11 @@ def filter_runtime(request: Request):
         recent.append({"started_at": row["started_at"], "ended_at": None if active else effective_end,
                        "duration_seconds": max(0, effective_end - row["started_at"]),
                        "mode": row["mode"], "speed": row["speed"], "active": active})
-    return {"summary": summary, "monthly": monthly, "runs": len(rows),
-            "recent": recent, "updated_at": now}
+    profile = [{"speed": speed, **values, "kwh": energy_by_speed[speed]}
+               for speed, values in PUMP_POWER_PROFILE.items()]
+    return {"summary": summary, "energy_kwh": energy, "energy_by_speed": profile,
+            "monthly": monthly, "runs": len(rows), "recent": recent, "updated_at": now,
+            "pump_model": "SPECK BADU Delta Eco VS"}
 
 
 @app.get("/api/admin/reports")
