@@ -19,7 +19,7 @@ from app.reports import generate_weekly_report
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -1108,7 +1108,15 @@ def require_admin(request: Request) -> None:
 
 
 @app.get("/")
-def index(): return FileResponse(BASE / "static" / "index.html")
+def index():
+    content = (BASE / "static" / "index.html").read_text(encoding="utf-8")
+    content = content.replace(
+        "try{document.documentElement.dataset.theme=localStorage.getItem('oxilife-theme')==='studio'?'studio':'classic'}catch(e){document.documentElement.dataset.theme='classic'}",
+        "try{let saved=localStorage.getItem('oxilife-theme'),standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;if(standalone&&localStorage.getItem('oxilife-theme-pwa-version')!=='2'){saved='studio';localStorage.setItem('oxilife-theme','studio');localStorage.setItem('oxilife-theme-pwa-version','2')}document.documentElement.dataset.theme=saved==='classic'?'classic':'studio'}catch(e){document.documentElement.dataset.theme='studio'}")
+    content = content.replace(
+        "if('serviceWorker'in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});",
+        "if('serviceWorker'in navigator){let refreshing=false;navigator.serviceWorker.addEventListener('controllerchange',()=>{if(refreshing)return;refreshing=true;location.reload()});navigator.serviceWorker.register('/service-worker.js').then(registration=>registration.update()).catch(()=>{})};")
+    return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
