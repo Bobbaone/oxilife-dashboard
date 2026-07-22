@@ -30,7 +30,7 @@ TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "ESP32").strip() or "ES
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
-PUMP_POWER_PROFILE = {
+DEFAULT_PUMP_POWER_PROFILE = {
     1: {"rpm": 1700, "watts": 200, "measured": True},
     2: {"rpm": 2000, "watts": round(200 * (2000 / 1700) ** 3), "measured": False},
     3: {"rpm": 3000, "watts": round(200 * (3000 / 1700) ** 3), "measured": False},
@@ -108,6 +108,16 @@ class ConnectionUpdate(BaseModel):
     tasmota_name: str = Field(min_length=1, max_length=80)
     oxilife_datapoint_id: int | None = Field(default=None, ge=1)
     oxilife_timeout_seconds: int = Field(default=30, ge=10, le=3600)
+
+
+class PumpStageProfile(BaseModel):
+    rpm: int = Field(ge=0, le=100000)
+    watts: int = Field(ge=0, le=100000)
+
+
+class PumpProfileUpdate(BaseModel):
+    model: str = Field(min_length=1, max_length=120)
+    stages: dict[int, PumpStageProfile]
 
 
 @contextmanager
@@ -209,6 +219,12 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('admin_password_hash',?)", (initial_hash,))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('session_token',?)", (secrets.token_urlsafe(32),))
+        conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('pump_model','SPECK BADU Delta Eco VS')")
+        for speed, profile in DEFAULT_PUMP_POWER_PROFILE.items():
+            conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)",
+                         (f"pump_stage_{speed}_rpm", str(profile["rpm"])))
+            conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)",
+                         (f"pump_stage_{speed}_watts", str(profile["watts"])))
         if setting(conn, "filtration_names_v2") != "1":
             conn.execute("UPDATE datapoints SET name='Betriebsart Filter',unit='',updated_at=? WHERE lower(path) LIKE '%neopool.filtration.mode'",
                          (int(time.time()),))
@@ -313,6 +329,22 @@ def verify_password(password: str, encoded: str) -> bool:
 def setting(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def pump_power_profile(conn: sqlite3.Connection | None = None) -> tuple[str, dict[int, dict[str, Any]]]:
+    if conn is None:
+        with db() as own_conn:
+            return pump_power_profile(own_conn)
+    model = setting(conn, "pump_model", "Filterpumpe")
+    profile = {}
+    for speed, defaults in DEFAULT_PUMP_POWER_PROFILE.items():
+        try:
+            rpm = int(setting(conn, f"pump_stage_{speed}_rpm", str(defaults["rpm"])))
+            watts = int(setting(conn, f"pump_stage_{speed}_watts", str(defaults["watts"])))
+        except ValueError:
+            rpm, watts = defaults["rpm"], defaults["watts"]
+        profile[speed] = {"rpm": rpm, "watts": watts, "measured": True}
+    return model, profile
 
 
 def weather_location() -> dict[str, Any] | None:
@@ -1297,23 +1329,60 @@ def filter_runtime_seconds(rows: list[sqlite3.Row], start_ts: int, end_ts: int, 
     return total
 
 
-def filter_energy_kwh(rows: list[sqlite3.Row], start_ts: int, end_ts: int, now: int) -> tuple[float, dict[int, float]]:
-    by_speed = {speed: 0.0 for speed in PUMP_POWER_PROFILE}
+def filter_energy_kwh(rows: list[sqlite3.Row], start_ts: int, end_ts: int, now: int,
+                      profile: dict[int, dict[str, Any]] | None = None) -> tuple[float, dict[int, float]]:
+    profile = profile or pump_power_profile()[1]
+    by_speed = {speed: 0.0 for speed in profile}
     max_gap = max(60, POLL_SECONDS * 3)
     for row in rows:
         try:
             speed = int(row["speed"])
         except (TypeError, ValueError):
             continue
-        profile = PUMP_POWER_PROFILE.get(speed)
-        if not profile:
+        stage = profile.get(speed)
+        if not stage:
             continue
         effective_end = row["ended_at"]
         if effective_end is None:
             effective_end = now if now - row["last_seen_at"] <= max_gap else row["last_seen_at"]
         seconds = max(0, min(effective_end, end_ts) - max(row["started_at"], start_ts))
-        by_speed[speed] += seconds * profile["watts"] / 3_600_000
+        by_speed[speed] += seconds * stage["watts"] / 3_600_000
     return sum(by_speed.values()), by_speed
+
+
+@app.get("/api/admin/filter-energy-history")
+def filter_energy_history(request: Request, hours: int = 24):
+    require_admin(request)
+    hours = min(max(hours, 1), 43800)
+    now = int(time.time())
+    since = now - hours * 3600
+    bucket = 300 if hours <= 48 else 1800 if hours <= 168 else 7200 if hours <= 744 else 21600 if hours <= 8760 else 86400
+    bucket_start = since // bucket * bucket
+    with db() as conn:
+        _, profile = pump_power_profile(conn)
+        rows = conn.execute("""SELECT * FROM filter_run_events
+                             WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?
+                             ORDER BY started_at""", (now + 1, since)).fetchall()
+    values = {ts: 0.0 for ts in range(bucket_start, now + 1, bucket)}
+    max_gap = max(60, POLL_SECONDS * 3)
+    for row in rows:
+        try:
+            watts = profile[int(row["speed"])]["watts"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        effective_end = row["ended_at"]
+        if effective_end is None:
+            effective_end = now if now - row["last_seen_at"] <= max_gap else row["last_seen_at"]
+        cursor, run_end = max(row["started_at"], since), min(effective_end, now)
+        while cursor < run_end:
+            current_bucket = cursor // bucket * bucket
+            part_end = min(run_end, current_bucket + bucket)
+            values[current_bucket] = values.get(current_bucket, 0.0) + (part_end - cursor) * watts / 3_600_000
+            cursor = part_end
+    series = [{"ts": ts, "value_num": round(value, 6)} for ts, value in values.items()]
+    total = sum(item["value_num"] for item in series)
+    return {"hours": hours, "bucket_seconds": bucket, "unit": "kWh", "total": total,
+            "values": series, "updated_at": now}
 
 
 @app.get("/api/admin/filter-runtime")
@@ -1326,6 +1395,7 @@ def filter_runtime(request: Request):
     month = month_start(local_now)
     year = month.replace(month=1)
     with db() as conn:
+        pump_model, profile_values = pump_power_profile(conn)
         rows = conn.execute("""SELECT * FROM filter_run_events
                              WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?
                              ORDER BY started_at""", (now + 1, 0)).fetchall()
@@ -1333,8 +1403,8 @@ def filter_runtime(request: Request):
               "month": int(month.timestamp()), "year": int(year.timestamp())}
     summary = {key: filter_runtime_seconds(rows, start, now, now) for key, start in bounds.items()}
     summary["total"] = filter_runtime_seconds(rows, 0, now, now)
-    energy = {key: filter_energy_kwh(rows, start, now, now)[0] for key, start in bounds.items()}
-    energy["total"], energy_by_speed = filter_energy_kwh(rows, 0, now, now)
+    energy = {key: filter_energy_kwh(rows, start, now, now, profile_values)[0] for key, start in bounds.items()}
+    energy["total"], energy_by_speed = filter_energy_kwh(rows, 0, now, now, profile_values)
     monthly = []
     for offset in range(-11, 1):
         start = month_start(local_now, offset)
@@ -1342,7 +1412,7 @@ def filter_runtime(request: Request):
         start_ts, end_ts = int(start.timestamp()), min(now, int(end.timestamp()))
         monthly.append({"key": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"),
                         "seconds": filter_runtime_seconds(rows, start_ts, end_ts, now),
-                        "kwh": filter_energy_kwh(rows, start_ts, end_ts, now)[0]})
+                        "kwh": filter_energy_kwh(rows, start_ts, end_ts, now, profile_values)[0]})
     recent = []
     max_gap = max(60, POLL_SECONDS * 3)
     for row in reversed(rows[-20:]):
@@ -1354,10 +1424,33 @@ def filter_runtime(request: Request):
                        "duration_seconds": max(0, effective_end - row["started_at"]),
                        "mode": row["mode"], "speed": row["speed"], "active": active})
     profile = [{"speed": speed, **values, "kwh": energy_by_speed[speed]}
-               for speed, values in PUMP_POWER_PROFILE.items()]
+               for speed, values in profile_values.items()]
     return {"summary": summary, "energy_kwh": energy, "energy_by_speed": profile,
             "monthly": monthly, "runs": len(rows), "recent": recent, "updated_at": now,
-            "pump_model": "SPECK BADU Delta Eco VS"}
+            "pump_model": pump_model}
+
+
+@app.get("/api/admin/pump-profile")
+def get_pump_profile(request: Request):
+    require_admin(request)
+    model, stages = pump_power_profile()
+    return {"model": model, "stages": stages}
+
+
+@app.put("/api/admin/pump-profile")
+def update_pump_profile(update: PumpProfileUpdate, request: Request):
+    require_admin(request)
+    if set(update.stages) != {1, 2, 3}:
+        raise HTTPException(status_code=400, detail="Für die Pumpenstufen 1, 2 und 3 werden Werte benötigt")
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('pump_model',?)", (update.model.strip(),))
+        for speed, stage in update.stages.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+                         (f"pump_stage_{speed}_rpm", str(stage.rpm)))
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+                         (f"pump_stage_{speed}_watts", str(stage.watts)))
+    model, stages = pump_power_profile()
+    return {"model": model, "stages": stages}
 
 
 @app.get("/api/admin/reports")

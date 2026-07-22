@@ -20,8 +20,38 @@ document.addEventListener("DOMContentLoaded", () => {
 
   loadBackwashEvents();
   loadBackwashSchedule();
+  loadPumpProfile();
   setInterval(loadBackwashEvents, 30000);
 });
+
+async function loadPumpProfile() {
+  const info = $("pumpProfileMsg");
+  try {
+    const data = await api("/api/admin/pump-profile");
+    $("pumpModel").value = data.model;
+    for (const speed of [1, 2, 3]) {
+      $("pumpRpm" + speed).value = data.stages[speed].rpm;
+      $("pumpWatts" + speed).value = data.stages[speed].watts;
+    }
+    info.textContent = "";
+  } catch (error) {
+    info.textContent = error.message;
+  }
+}
+
+async function savePumpProfile() {
+  const info = $("pumpProfileMsg");
+  info.textContent = "Pumpenprofil wird gespeichert …";
+  try {
+    const stages = {};
+    for (const speed of [1, 2, 3]) stages[speed] = {
+      rpm: Number($("pumpRpm" + speed).value), watts: Number($("pumpWatts" + speed).value)};
+    await api("/api/admin/pump-profile", {method: "PUT", body: JSON.stringify({model: $("pumpModel").value, stages})});
+    info.textContent = "Pumpenprofil gespeichert. Statistiken und Berichte verwenden ab jetzt diese Werte.";
+  } catch (error) {
+    info.textContent = error.message;
+  }
+}
 
 async function loadBackwashSchedule() {
   const info = $("backwashScheduleInfo");

@@ -24,7 +24,7 @@ async function loadRuntime() {
   $("energySummary").innerHTML = [["Energie heute",data.energy_kwh.today],["Energie dieses Jahr",data.energy_kwh.year],["Energie gesamt",data.energy_kwh.total]].map(item => `<div class="runtime-card"><span class="muted">${item[0]}</span><b>${kwh(item[1])}</b></div>`).join("");
   const maximum = Math.max(1, ...data.monthly.map(item => item.seconds));
   $("runtimeMonths").innerHTML = data.monthly.map(item => `<div class="runtime-month"><span class="muted">${item.label}</span><b>${duration(item.seconds)}</b><div>${kwh(item.kwh)}</div><div class="runtime-bar"><i style="width:${item.seconds / maximum * 100}%"></i></div></div>`).join("");
-  $("powerProfile").innerHTML = data.energy_by_speed.map(item => `<div class="power-card"><span class="muted">Stufe ${item.speed} · ${Number(item.rpm).toLocaleString("de-DE")} U/min</span><b>${item.watts} W</b><div>${kwh(item.kwh)} erfasst · ${item.measured ? "gemessen" : "geschätzt"}</div></div>`).join("");
+  $("powerProfile").innerHTML = data.energy_by_speed.map(item => `<div class="power-card"><span class="muted">Stufe ${item.speed} · ${Number(item.rpm).toLocaleString("de-DE")} U/min</span><b>${item.watts} W</b><div>${kwh(item.kwh)} erfasst · individuell hinterlegt</div></div>`).join("");
   const modes = ["Manuell","Automatik","Heizung","Smart","Intelligent"];
   $("runtimeRuns").innerHTML = data.recent.map(item => `<div class="report"><div><b>${new Date(item.started_at * 1000).toLocaleString("de-DE")} – ${item.active ? "läuft" : new Date(item.ended_at * 1000).toLocaleString("de-DE")}</b><div class="muted">${duration(item.duration_seconds)} · ${modes[item.mode] ?? "Modus " + item.mode} · Stufe ${item.speed ?? "–"}</div></div></div>`).join("") || '<p class="muted">Noch keine Pumpenlaufzeit erfasst.</p>';
 }
@@ -52,8 +52,11 @@ function meaningful(series) {
 }
 
 async function loadHistory() {
-  const data=await api("/api/admin/history?hours=" + $("range").value), series=data.series.filter(meaningful);
-  $("charts").innerHTML=series.map((item,index)=>`<article class="chartbox"><b>${esc(item.datapoint.name)}</b><div class="muted">Min ${item.stats.min ?? "–"} · Ø ${item.stats.avg == null ? "–" : Number(item.stats.avg).toFixed(item.datapoint.decimals)} · Max ${item.stats.max ?? "–"} · ${item.stats.samples} Werte</div><canvas class="chart" id="chart${index}"></canvas></article>`).join("") || '<p class="muted">Noch keine echten Messwerte vorhanden. Nullwerte und technische Statusfelder werden nicht als Statistik dargestellt.</p>';
+  const hours=$("range").value;
+  const [data,energy]=await Promise.all([api("/api/admin/history?hours=" + hours),api("/api/admin/filter-energy-history?hours=" + hours)]), series=data.series.filter(meaningful);
+  const energyCard=`<article class="chartbox"><b>Stromverbrauch Pumpe</b><div class="muted">Gesamt ${kwh(energy.total)} · Verbrauch je ${energy.bucket_seconds < 3600 ? energy.bucket_seconds / 60 + " Minuten" : energy.bucket_seconds / 3600 + " Stunden"}</div><canvas class="chart" id="energyChart"></canvas></article>`;
+  $("charts").innerHTML=energyCard+series.map((item,index)=>`<article class="chartbox"><b>${esc(item.datapoint.name)}</b><div class="muted">Min ${item.stats.min ?? "–"} · Ø ${item.stats.avg == null ? "–" : Number(item.stats.avg).toFixed(item.datapoint.decimals)} · Max ${item.stats.max ?? "–"} · ${item.stats.samples} Werte</div><canvas class="chart" id="chart${index}"></canvas></article>`).join("");
+  draw($("energyChart"),energy.values);
   series.forEach((item,index)=>draw($("chart"+index),item.values));
 }
 

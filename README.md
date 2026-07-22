@@ -178,6 +178,10 @@ Das Dashboard nutzt STARTTLS. Pro Datenpunkt wird während eines anhaltenden Nie
 
 Die vorhandenen Filterstufen- und Rückspülfunktionen bleiben erhalten. Die voreingetragenen Befehle sind Platzhalter und müssen vor dem Einsatz an einer echten Anlage geprüft werden.
 
+### Individuelles Pumpenprofil
+
+Unter **Pumpe → Pumpenprofil** können Pumpenmodell, Drehzahl und Leistungsaufnahme in Watt für die Stufen **Langsam**, **Mittel** und **Schnell** hinterlegt werden. Das Dashboard verwendet diese individuellen Werte für die Stromverbrauchsdiagramme, die kWh-Zusammenfassungen und die PDF-Wochenberichte. Die Konfiguration wird persistent in SQLite gespeichert und bleibt bei Container-Updates erhalten.
+
 ## Datenspeicherung
 
 SQLite liegt unter `/app/data/oxilife.db`. Docker Compose bindet dafür das benannte Volume `oxilife-dashboard-data` ein. Ein bestehendes bind-mount-basiertes `./data/oxilife.db` wird nicht automatisch in das neue Volume kopiert; bei einem Upgrade die Datei einmalig übernehmen oder den bisherigen Mount beibehalten.
