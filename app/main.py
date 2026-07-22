@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import ipaddress
+import logging
 import os
 import secrets
 import smtplib
@@ -40,6 +41,7 @@ DEFAULT_PUMP_POWER_PROFILE = {
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "wasserwerte")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "change-me")
+SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "false").strip().lower() in {"1", "true", "yes", "on"}
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -62,6 +64,11 @@ poll_lock = asyncio.Lock()
 weather_lock = asyncio.Lock()
 weather_cache: dict[str, Any] = {"fetched_at": 0, "data": None, "error": None}
 filter_timer_cache: dict[str, Any] = {"fetched_at": 0, "values": {}, "speeds": {}}
+login_attempts: dict[str, list[float]] = {}
+login_attempts_lock = asyncio.Lock()
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+security_logger = logging.getLogger("uvicorn.error")
 last_report_week: tuple[int, int] | None = None
 
 
@@ -1167,6 +1174,55 @@ async def poller() -> None:
         await asyncio.sleep(POLL_SECONDS)
 
 
+def validate_security_config() -> None:
+    known_defaults = {
+        "change-me", "bitte-unbedingt-aendern", "",
+        "hier-eine-lange-zufaellige-zeichenfolge-eintragen",
+        "bitte-eine-lange-zufaellige-zeichenfolge-eintragen",
+    }
+    if SESSION_SECRET in known_defaults or len(SESSION_SECRET) < 32:
+        security_logger.warning(
+            "UNSICHERE KONFIGURATION: SESSION_SECRET ist ein bekannter Standardwert oder kürzer als 32 Zeichen. "
+            "Bitte vor einer Internetfreigabe eine lange, zufällige Zeichenfolge setzen."
+        )
+
+
+def login_limit_keys(request: Request, username: str) -> tuple[str, str]:
+    # Cloudflare provides the original address. The account-wide key still prevents
+    # bypassing the limit with a forged forwarding header on a directly exposed port.
+    forwarded = request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for", "").split(",")[0]
+    client_ip = forwarded.strip() or (request.client.host if request.client else "unknown")
+    account_hash = hashlib.sha256(username.strip().lower().encode()).hexdigest()
+    return f"ip:{client_ip}", f"account:{account_hash}"
+
+
+async def enforce_login_limit(keys: tuple[str, str]) -> None:
+    now = time.monotonic()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    async with login_attempts_lock:
+        for key in keys:
+            attempts = [value for value in login_attempts.get(key, []) if value > cutoff]
+            login_attempts[key] = attempts
+            if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+                retry_after = max(1, int(LOGIN_WINDOW_SECONDS - (now - attempts[0])))
+                raise HTTPException(status_code=429, detail="Zu viele Anmeldeversuche. Bitte später erneut versuchen.",
+                                    headers={"Retry-After": str(retry_after)})
+
+
+async def record_login_failure(keys: tuple[str, str]) -> None:
+    now = time.monotonic()
+    cutoff = now - LOGIN_WINDOW_SECONDS
+    async with login_attempts_lock:
+        for key in keys:
+            login_attempts[key] = [value for value in login_attempts.get(key, []) if value > cutoff] + [now]
+
+
+async def clear_login_failures(keys: tuple[str, str]) -> None:
+    async with login_attempts_lock:
+        for key in keys:
+            login_attempts.pop(key, None)
+
+
 def ensure_weekly_report() -> Path:
     now = datetime.now().astimezone()
     this_monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1180,6 +1236,7 @@ def ensure_weekly_report() -> Path:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_security_config()
     init_db()
     task = asyncio.create_task(poller())
     yield
@@ -1191,7 +1248,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="PoolMonitor", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=False)
+app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=SESSION_HTTPS_ONLY)
 
 
 def valid_admin_session(request: Request) -> bool:
@@ -1700,16 +1757,23 @@ async def poll_now(request: Request):
 @app.post("/api/login")
 async def login(request: Request):
     body = await request.json()
+    username = str(body.get("username", ""))
+    limit_keys = login_limit_keys(request, username)
+    await enforce_login_limit(limit_keys)
     with db() as conn:
         admin_username = setting(conn, "admin_username", ADMIN_USER)
         password_hash = setting(conn, "admin_password_hash")
         change_required = setting(conn, "password_change_required", "1") == "1"
         auth_token = setting(conn, "session_token")
-    if body.get("username") == admin_username and verify_password(str(body.get("password", "")), password_hash):
+    password_valid = verify_password(str(body.get("password", "")), password_hash)
+    username_valid = hmac.compare_digest(username, admin_username)
+    if username_valid and password_valid:
+        await clear_login_failures(limit_keys)
         request.session["admin"] = True
         request.session["auth_token"] = auth_token
         request.session["password_change_required"] = change_required
         return {"ok": True, "password_change_required": change_required}
+    await record_login_failure(limit_keys)
     raise HTTPException(status_code=401, detail="Falsche Zugangsdaten")
 
 
@@ -1985,4 +2049,4 @@ async def backwash(request: Request):
 
 @app.exception_handler(HTTPException)
 def http_exception(_: Request, exc: HTTPException):
-    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)

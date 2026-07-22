@@ -18,6 +18,7 @@ Danach in `docker-compose.yml` mindestens diese Werte anpassen:
 - `TASMOTA_BASE_URL`: Adresse des Tasmota-Geräts, zum Beispiel `http://192.168.1.50`
 - `ADMIN_PASSWORD`: automatisch vergebenes Passwort für die erste Anmeldung (Standard: `wasserwerte`)
 - `SESSION_SECRET`: lange, zufällige Zeichenfolge
+- `SESSION_HTTPS_ONLY`: bei ausschließlichem HTTPS-Betrieb hinter einem Reverse Proxy auf `true` setzen
 - bei Bedarf `TASMOTA_STATUS_PATH`, Abfrageintervall und Steuerbefehle
 
 Container bauen und im Hintergrund starten:
@@ -55,6 +56,12 @@ docker run -d \
 ```
 
 `TASMOTA_BASE_URL` und `SESSION_SECRET` müssen vor dem Start angepasst werden. Die erste Anmeldung erfolgt mit `admin` und dem Initialpasswort `wasserwerte`. Danach erzwingt das Dashboard ein individuelles Passwort mit mindestens zehn Zeichen. Der Benutzername `admin` kann beibehalten oder optional geändert werden. Die Zugangsdaten werden persistent gespeichert; das Passwort liegt ausschließlich als PBKDF2-SHA256-Hash in SQLite.
+
+Bei einem unsicheren oder zu kurzen `SESSION_SECRET` schreibt die Anwendung eine deutliche Warnung ins Container-Log. Für öffentlich erreichbare Installationen sollte `SESSION_HTTPS_ONLY=true` gesetzt werden. Dann wird das Session-Cookie ausschließlich über HTTPS übertragen; eine Anmeldung über eine direkte unverschlüsselte LAN-Adresse ist in diesem Modus absichtlich nicht möglich. Port `8090` darf nicht direkt aus dem Internet erreichbar sein – vorgeschaltet werden sollte ein TLS-terminierender Reverse Proxy oder Cloudflare Tunnel.
+
+Das Login akzeptiert höchstens fünf Fehlversuche innerhalb von 15 Minuten pro Client und Benutzerkonto. Weitere Versuche werden vorübergehend mit HTTP `429` und einem `Retry-After`-Header abgewiesen.
+
+Der eigentliche Dashboard-Prozess läuft im Container als unprivilegierter Benutzer `poolmonitor` (UID/GID 10001). Beim Start korrigiert ein kurzer Entrypoint mit Root-Rechten ausschließlich die Besitzrechte des persistenten Verzeichnisses `/app/data` und gibt anschließend alle Privilegien dauerhaft ab. Dadurch bleiben auch bereits vorhandene SQLite-Volumes nach dem Update beschreibbar.
 
 ### Dashboard öffnen
 

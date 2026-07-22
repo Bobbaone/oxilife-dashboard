@@ -14,6 +14,7 @@ services:
       ADMIN_USER: admin
       ADMIN_PASSWORD: wasserwerte
       SESSION_SECRET: ${SESSION_SECRET:-bitte-unbedingt-aendern}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-false}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}

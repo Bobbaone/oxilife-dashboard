@@ -26,7 +26,7 @@ async function loadRuntime() {
   $("runtimeMonths").innerHTML = data.monthly.map(item => `<div class="runtime-month"><span class="muted">${item.label}</span><b>${duration(item.seconds)}</b><div>${kwh(item.kwh)}</div><div class="runtime-bar"><i style="width:${item.seconds / maximum * 100}%"></i></div></div>`).join("");
   $("powerProfile").innerHTML = data.energy_by_speed.map(item => `<div class="power-card"><span class="muted">Stufe ${item.speed} · ${Number(item.rpm).toLocaleString("de-DE")} U/min</span><b>${item.watts} W</b><div>${kwh(item.kwh)} erfasst · individuell hinterlegt</div></div>`).join("");
   const modes = ["Manuell","Automatik","Heizung","Smart","Intelligent"];
-  $("runtimeRuns").innerHTML = data.recent.map(item => `<div class="report"><div><b>${new Date(item.started_at * 1000).toLocaleString("de-DE")} – ${item.active ? "läuft" : new Date(item.ended_at * 1000).toLocaleString("de-DE")}</b><div class="muted">${duration(item.duration_seconds)} · ${modes[item.mode] ?? "Modus " + item.mode} · Stufe ${item.speed ?? "–"}</div></div></div>`).join("") || '<p class="muted">Noch keine Pumpenlaufzeit erfasst.</p>';
+  $("runtimeRuns").innerHTML = data.recent.map(item => `<div class="report"><div><b>${new Date(item.started_at * 1000).toLocaleString("de-DE")} – ${item.active ? "läuft" : new Date(item.ended_at * 1000).toLocaleString("de-DE")}</b><div class="muted">${duration(item.duration_seconds)} · ${esc(modes[item.mode] ?? "Modus " + item.mode)} · Stufe ${esc(item.speed ?? "–")}</div></div></div>`).join("") || '<p class="muted">Noch keine Pumpenlaufzeit erfasst.</p>';
 }
 
 function draw(canvas, values) {
