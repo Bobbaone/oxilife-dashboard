@@ -1,7 +1,7 @@
 {
-  "name": "Oxilife Dashboard",
-  "short_name": "Oxilife",
-  "description": "Lokales Dashboard für Oxilife-Poolanlagen",
+  "name": "PoolMonitor",
+  "short_name": "PoolMonitor",
+  "description": "Lokales Dashboard für Poolanlagen",
   "lang": "de-DE",
   "id": "/",
   "start_url": "/",

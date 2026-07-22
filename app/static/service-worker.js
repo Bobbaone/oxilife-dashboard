@@ -1,4 +1,4 @@
-const CACHE = "oxilife-pwa-v2";
+const CACHE = "poolmonitor-pwa-v1";
 const OFFLINE_ASSETS = [
   "/offline",
   "/manifest.webmanifest",

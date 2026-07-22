@@ -390,7 +390,7 @@ async def resolve_postal_code(postal_code: str) -> dict[str, Any]:
             response = await client.get("https://nominatim.openstreetmap.org/search", params={
                 "postalcode": postal_code, "country": "Deutschland", "format": "jsonv2",
                 "limit": 1, "addressdetails": 1,
-            }, headers={"User-Agent": "Oxilife-Dashboard/1.0"})
+            }, headers={"User-Agent": "PoolMonitor/1.0"})
             response.raise_for_status()
             results = response.json()
     except Exception as exc:
@@ -873,7 +873,7 @@ def send_low_alert(name: str, value: Any, unit: str) -> None:
         raise RuntimeError("SMTP_HOST, SMTP_FROM oder ALERT_EMAIL_TO fehlt")
     rendered = (f"{value:g}" if isinstance(value, (int, float)) else str(value)) + ((' ' + unit) if unit else '')
     message = EmailMessage()
-    message["Subject"] = f"Oxilife-Warnung: {name} niedrig"
+    message["Subject"] = f"PoolMonitor-Warnung: {name} niedrig"
     message["From"] = SMTP_FROM
     message["To"] = ALERT_EMAIL_TO
     message.set_content(f"Achtung. Füllstand {name}: {rendered}.")
@@ -1084,7 +1084,7 @@ async def lifespan(_: FastAPI):
         pass
 
 
-app = FastAPI(title="Oxilife Dashboard", lifespan=lifespan)
+app = FastAPI(title="PoolMonitor", lifespan=lifespan)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=False)
 
 
@@ -1110,6 +1110,11 @@ def require_admin(request: Request) -> None:
 @app.get("/")
 def index():
     content = (BASE / "static" / "index.html").read_text(encoding="utf-8")
+    content = content.replace('apple-mobile-web-app-title" content="Oxilife"',
+                              'apple-mobile-web-app-title" content="PoolMonitor"')
+    content = content.replace("<title>Oxilife Dashboard</title>", "<title>PoolMonitor</title>")
+    content = content.replace("<h1><span>OXILIFE</span> <em>DASHBOARD</em></h1>",
+                              "<h1><span>POOL</span> <em>MONITOR</em></h1>")
     content = content.replace(
         "try{document.documentElement.dataset.theme=localStorage.getItem('oxilife-theme')==='studio'?'studio':'classic'}catch(e){document.documentElement.dataset.theme='classic'}",
         "try{let saved=localStorage.getItem('oxilife-theme'),standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;if(standalone&&localStorage.getItem('oxilife-theme-pwa-version')!=='2'){saved='studio';localStorage.setItem('oxilife-theme','studio');localStorage.setItem('oxilife-theme-pwa-version','2')}document.documentElement.dataset.theme=saved==='classic'?'classic':'studio'}catch(e){document.documentElement.dataset.theme='studio'}")
@@ -1151,11 +1156,17 @@ def pwa_icon(filename: str):
 
 
 @app.get("/admin")
-def admin(): return FileResponse(BASE / "static" / "admin.html")
+def admin():
+    content = (BASE / "static" / "admin.html").read_text(encoding="utf-8")
+    content = content.replace("Oxilife Admin", "PoolMonitor Admin")
+    return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/statistics")
-def statistics_page(): return FileResponse(BASE / "static" / "statistics.html")
+def statistics_page():
+    content = (BASE / "static" / "statistics.html").read_text(encoding="utf-8")
+    content = content.replace("Oxilife Statistiken", "PoolMonitor Statistiken")
+    return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/statistics.js", include_in_schema=False)
@@ -1165,7 +1176,10 @@ def statistics_script():
 
 
 @app.get("/pump")
-def pump_page(): return FileResponse(BASE / "static" / "pump.html")
+def pump_page():
+    content = (BASE / "static" / "pump.html").read_text(encoding="utf-8")
+    content = content.replace("Oxilife Pumpe", "PoolMonitor Pumpe")
+    return HTMLResponse(content, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/pump-controls.js", include_in_schema=False)

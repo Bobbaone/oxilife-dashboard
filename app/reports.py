@@ -56,7 +56,7 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
     styles.add(ParagraphStyle(name="Section", parent=styles["Heading2"], textColor=DARK,
                               fontSize=15, spaceBefore=10, spaceAfter=8))
     doc = SimpleDocTemplate(str(output_path), pagesize=A4, rightMargin=16*mm, leftMargin=16*mm,
-                            topMargin=15*mm, bottomMargin=15*mm, title="Oxilife Wochenbericht")
+                            topMargin=15*mm, bottomMargin=15*mm, title="PoolMonitor Wochenbericht")
     total, online = int(poll["total"] or 0), int(poll["online"] or 0)
     availability = online / total * 100 if total else 0
     runtime_seconds = sum(max(0, min(row["ended_at"] or row["last_seen_at"], end_ts) -
@@ -65,7 +65,7 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                              max(row["started_at"], start_ts)) * configured_watts.get(row["speed"], 0) / 3_600_000
                      for row in filter_runs)
     runtime_hours, runtime_minutes = divmod(runtime_seconds // 60, 60)
-    story = [Paragraph("OXILIFE WOCHENBERICHT", styles["ReportTitle"]),
+    story = [Paragraph("POOLMONITOR WOCHENBERICHT", styles["ReportTitle"]),
              Paragraph(f"{start:%d.%m.%Y} bis {end:%d.%m.%Y}", styles["Sub"]),
              Paragraph("Zusammenfassung", styles["Section"]),
              Table([["Erfasste Datenpunkte", str(len(points))], ["Abfragen", str(total)],
@@ -133,7 +133,7 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
         story.append(backwash_table)
     else:
         story.append(Paragraph("In dieser Kalenderwoche wurde keine Rückspülung erkannt.", styles["BodyText"]))
-    story += [Spacer(1, 7*mm), Paragraph("Automatisch erstellt vom lokalen Oxilife Dashboard.", styles["Sub"])]
+    story += [Spacer(1, 7*mm), Paragraph("Automatisch erstellt von PoolMonitor.", styles["Sub"])]
 
     def footer(canvas, document):
         canvas.saveState(); canvas.setFillColor(MUTED); canvas.setFont("Helvetica", 8)

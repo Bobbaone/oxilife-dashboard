@@ -1,6 +1,6 @@
-# Oxilife Dashboard
+# PoolMonitor
 
-Das Dashboard erkennt sämtliche Werte einer beliebig verschachtelten Tasmota-JSON-Antwort automatisch. Jeder Datenpunkt wird in SQLite registriert und kann im Adminbereich individuell konfiguriert werden.
+PoolMonitor ist ein lokales Dashboard für Oxilife-/NeoPool-Poolanlagen. Es erkennt sämtliche Werte einer beliebig verschachtelten Tasmota-JSON-Antwort automatisch. Jeder Datenpunkt wird in SQLite registriert und kann im Adminbereich individuell konfiguriert werden.
 
 ## Mit Docker installieren und starten
 
@@ -148,7 +148,7 @@ Für die Ortsauflösung wird [OpenStreetMap Nominatim](https://nominatim.openstr
 
 Das öffentliche Dashboard ist als Progressive Web App (PWA) vorbereitet. Auf iPhone und iPad die Dashboard-Adresse in Safari öffnen und **Teilen → Zum Home-Bildschirm** auswählen. Auf Android kann im Browser **App installieren** oder **Zum Startbildschirm hinzufügen** verwendet werden.
 
-Die installierte PWA startet mit eigenem Oxilife-Icon im eigenständigen App-Fenster. Ist der Dashboard-Server nicht erreichbar, erscheint eine eindeutige Offline-Seite. Messwerte und Steuerbefehle werden absichtlich nicht offline zwischengespeichert, damit keine veralteten Anlagenzustände als aktuell erscheinen.
+Die installierte PWA startet als **PoolMonitor** im eigenständigen App-Fenster. Ist der Dashboard-Server nicht erreichbar, erscheint eine eindeutige Offline-Seite. Messwerte und Steuerbefehle werden absichtlich nicht offline zwischengespeichert, damit keine veralteten Anlagenzustände als aktuell erscheinen.
 
 Für Installation und Service Worker muss das Dashboard per HTTPS oder lokal über `localhost` aufgerufen werden. Bei Änderungen aktualisiert sich die PWA automatisch mit der veröffentlichten Webseite.
 
