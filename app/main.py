@@ -1072,6 +1072,12 @@ def service_worker():
                         headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
 
+@app.get("/theme-studio.css", include_in_schema=False)
+def studio_theme_stylesheet():
+    return FileResponse(BASE / "static" / "theme-studio.css", media_type="text/css",
+                        headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/offline", include_in_schema=False)
 def offline_page():
     return FileResponse(BASE / "static" / "offline.html")
