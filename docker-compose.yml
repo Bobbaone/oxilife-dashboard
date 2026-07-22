@@ -14,13 +14,13 @@ services:
       ADMIN_USER: admin
       ADMIN_PASSWORD: wasserwerte
       SESSION_SECRET: ${SESSION_SECRET:-bitte-unbedingt-aendern}
-      # SMTP_HOST: smtp.example.com
-      # SMTP_PORT: 587
-      # SMTP_USER: dashboard@example.com
-      # SMTP_PASSWORD: bitte-aendern
-      # SMTP_FROM: dashboard@example.com
-      # ALERT_EMAIL_TO: empfaenger@example.com
-      # ALERT_COOLDOWN_SECONDS: 3600
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_COOLDOWN_SECONDS: ${ALERT_COOLDOWN_SECONDS:-3600}
       WEATHER_POSTAL_CODE: "75015"
       WEATHER_REFRESH_SECONDS: 900
       FILTER_SPEED_COMMAND_1: /cm?cmnd=NPFiltrationspeed%201
