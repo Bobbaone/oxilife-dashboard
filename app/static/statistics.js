@@ -60,6 +60,15 @@ async function loadHistory() {
   series.forEach((item,index)=>draw($("chart"+index),item.values));
 }
 
+async function loadWeatherHistory() {
+  const data=await api("/api/admin/weather-history?hours="+$('range').value), stats=data.stats;
+  const temp=value=>value == null ? "–" : Number(value).toLocaleString("de-DE",{minimumFractionDigits:1,maximumFractionDigits:1})+" °C";
+  $("weatherSummary").innerHTML=[["Minimum",temp(stats.minimum)],["Durchschnitt",temp(stats.average)],["Maximum",temp(stats.maximum)],["Aufzeichnungen",stats.samples]].map(item=>`<div class="runtime-card"><span class="muted">${item[0]}</span><b>${item[1]}</b></div>`).join("");
+  $("weatherChartMeta").textContent=`${stats.samples} Wetterwerte · Intervall ${data.bucket_seconds/3600 < 1 ? data.bucket_seconds/60+" Minuten" : data.bucket_seconds/3600+" Stunden"}`;
+  draw($("weatherChart"),data.values);
+  $("weatherDays").innerHTML=data.days.map(day=>`<div class="weather-day"><span class="muted">${new Date(day.date+"T12:00:00").toLocaleDateString("de-DE",{weekday:"short",day:"2-digit",month:"2-digit"})}</span><b>${esc(day.condition)}</b><span>${temp(day.minimum)} bis ${temp(day.maximum)}</span><span class="muted">Ø Luftfeuchte ${day.humidity == null ? "–" : Math.round(day.humidity)+" %"} · Wind max. ${day.wind_max == null ? "–" : Number(day.wind_max).toLocaleString("de-DE",{maximumFractionDigits:1})+" km/h"}</span></div>`).join("") || '<p class="muted">Noch keine Wetterhistorie vorhanden. Der erste Wert wird beim nächsten Wetterabruf gespeichert.</p>';
+}
+
 async function loadReports() {
   const reports=await api("/api/admin/reports");
   $("reports").innerHTML=reports.map(report=>`<div class="report"><div><b>${esc(report.filename.replace(".pdf","").replaceAll("_"," "))}</b><div class="muted">${new Date(report.created_at*1000).toLocaleString("de-DE")} · ${(report.size/1024).toFixed(0)} KB</div></div><a href="/api/admin/reports/${encodeURIComponent(report.filename)}">PDF herunterladen</a></div>`).join("") || '<p class="muted">Noch kein abgeschlossener Wochenbericht vorhanden.</p>';
@@ -70,4 +79,4 @@ async function loadSystemStatus() {
   $("systemmsg").textContent=(data.online ? "Online · " : "Offline · ") + (data.updated_at ? new Date(data.updated_at*1000).toLocaleString("de-DE") : "keine Daten");
 }
 
-Promise.all([loadRuntime(),loadHistory(),loadReports(),loadSystemStatus()]).catch(error => { $("reports").innerHTML='<p class="muted">'+esc(error.message)+"</p>"; });
+Promise.all([loadRuntime(),loadHistory(),loadWeatherHistory(),loadReports(),loadSystemStatus()]).catch(error => { $("reports").innerHTML='<p class="muted">'+esc(error.message)+"</p>"; });

@@ -9,6 +9,7 @@ import smtplib
 import sqlite3
 import time
 import re
+from collections import Counter
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -196,10 +197,21 @@ def init_db() -> None:
                 mode INTEGER,
                 speed INTEGER
             );
+            CREATE TABLE IF NOT EXISTS weather_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL UNIQUE,
+                temperature REAL NOT NULL,
+                apparent_temperature REAL,
+                humidity REAL,
+                weather_code INTEGER,
+                wind_speed REAL,
+                city TEXT NOT NULL DEFAULT ''
+            );
             CREATE INDEX IF NOT EXISTS idx_readings_point_ts ON readings(datapoint_id, ts);
             CREATE INDEX IF NOT EXISTS idx_poll_events_ts ON poll_events(ts);
             CREATE INDEX IF NOT EXISTS idx_backwash_started_at ON backwash_events(started_at);
             CREATE INDEX IF NOT EXISTS idx_filter_run_started_at ON filter_run_events(started_at);
+            CREATE INDEX IF NOT EXISTS idx_weather_readings_ts ON weather_readings(ts);
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -411,6 +423,47 @@ def save_weather_location(location: dict[str, Any]) -> None:
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)", (f"weather_{key}", str(value)))
 
 
+def weather_description(code: Any) -> str:
+    try:
+        value = int(code)
+    except (TypeError, ValueError):
+        return "Unbekannt"
+    if value == 0:
+        return "Sonnig"
+    if value in (1, 2):
+        return "Leicht bewölkt"
+    if value == 3:
+        return "Bewölkt"
+    if value in (45, 48):
+        return "Nebel"
+    if 51 <= value <= 57:
+        return "Nieselregen"
+    if 61 <= value <= 67:
+        return "Regen"
+    if 71 <= value <= 77:
+        return "Schnee"
+    if 80 <= value <= 82:
+        return "Regenschauer"
+    if 85 <= value <= 86:
+        return "Schneeschauer"
+    if value >= 95:
+        return "Gewitter"
+    return "Unbekannt"
+
+
+def record_weather(data: dict[str, Any]) -> None:
+    temperature = data.get("temperature")
+    if not isinstance(temperature, (int, float)):
+        return
+    with db() as conn:
+        conn.execute("""INSERT OR IGNORE INTO weather_readings
+                     (ts,temperature,apparent_temperature,humidity,weather_code,wind_speed,city)
+                     VALUES(?,?,?,?,?,?,?)""",
+                     (int(data["updated_at"]), float(temperature), data.get("apparent_temperature"),
+                      data.get("humidity"), data.get("weather_code"), data.get("wind_speed"),
+                      str(data.get("city", ""))))
+
+
 async def current_weather(force: bool = False) -> dict[str, Any]:
     location = weather_location()
     if not location and len(WEATHER_POSTAL_CODE) == 5 and WEATHER_POSTAL_CODE.isdigit():
@@ -442,6 +495,7 @@ async def current_weather(force: bool = False) -> dict[str, Any]:
                     "humidity": current.get("relative_humidity_2m"), "weather_code": current.get("weather_code"),
                     "wind_speed": current.get("wind_speed_10m"), "wind_unit": units.get("wind_speed_10m", "km/h"),
                     "attribution": "Open-Meteo"}
+            record_weather(data)
             weather_cache.update(fetched_at=now, data=data, error=None)
             return data
         except Exception as exc:
@@ -1051,6 +1105,11 @@ async def poller() -> None:
     global last_report_week
     while True:
         await poll_once()
+        try:
+            await current_weather()
+        except Exception:
+            # Wetterfehler dürfen die Anlagenabfrage nicht unterbrechen.
+            pass
         current_week = tuple(datetime.now().astimezone().isocalendar()[:2])
         if current_week != last_report_week:
             try:
@@ -1339,6 +1398,44 @@ def history(request: Request, hours: int = 24, point_ids: str = ""):
                 scaled_stats["min"], scaled_stats["max"] = scaled_stats["max"], scaled_stats["min"]
             series.append({"datapoint": point_dict(point), "values": values, "stats": scaled_stats})
     return {"hours": hours, "bucket_seconds": bucket, "series": series}
+
+
+@app.get("/api/admin/weather-history")
+def weather_history(request: Request, hours: int = 8760):
+    require_admin(request)
+    hours = min(max(hours, 1), 43800)
+    since = int(time.time()) - hours * 3600
+    bucket = 1800 if hours <= 168 else 7200 if hours <= 744 else 21600 if hours <= 8760 else 86400
+    with db() as conn:
+        rows = conn.execute("""SELECT ts,temperature,apparent_temperature,humidity,weather_code,wind_speed,city
+                             FROM weather_readings WHERE ts>=? ORDER BY ts""", (since,)).fetchall()
+        chart = conn.execute("""SELECT (ts / ?) * ? ts,AVG(temperature) value_num
+                              FROM weather_readings WHERE ts>=? GROUP BY ts/? ORDER BY ts""",
+                             (bucket, bucket, since, bucket)).fetchall()
+    values = [dict(row) for row in rows]
+    daily: dict[str, list[dict[str, Any]]] = {}
+    for item in values:
+        key = datetime.fromtimestamp(item["ts"]).astimezone().strftime("%Y-%m-%d")
+        daily.setdefault(key, []).append(item)
+    days = []
+    for key, items in sorted(daily.items(), reverse=True)[:31]:
+        temperatures = [float(item["temperature"]) for item in items]
+        codes = [int(item["weather_code"]) for item in items if item["weather_code"] is not None]
+        humidities = [float(item["humidity"]) for item in items if item["humidity"] is not None]
+        winds = [float(item["wind_speed"]) for item in items if item["wind_speed"] is not None]
+        dominant_code = Counter(codes).most_common(1)[0][0] if codes else None
+        days.append({"date": key, "minimum": min(temperatures), "maximum": max(temperatures),
+                     "average": sum(temperatures) / len(temperatures), "weather_code": dominant_code,
+                     "condition": weather_description(dominant_code),
+                     "humidity": sum(humidities) / len(humidities) if humidities else None,
+                     "wind_max": max(winds) if winds else None, "samples": len(items)})
+    temperatures = [float(item["temperature"]) for item in values]
+    return {"hours": hours, "bucket_seconds": bucket, "values": [dict(row) for row in chart],
+            "stats": {"minimum": min(temperatures) if temperatures else None,
+                      "maximum": max(temperatures) if temperatures else None,
+                      "average": sum(temperatures) / len(temperatures) if temperatures else None,
+                      "samples": len(temperatures)},
+            "days": days}
 
 
 def month_start(value: datetime, offset: int = 0) -> datetime:

@@ -133,6 +133,8 @@ Kritische oder schlechte freigegebene Messwerte werden zusätzlich in einer gut 
 
 Im Adminbereich kann unter **Wetter** eine fünfstellige deutsche Postleitzahl gespeichert werden. Das Dashboard ermittelt den zugehörigen Ort und zeigt unten mittig auf der öffentlichen Startseite aktuelle Temperatur, Wetterlage, Luftfeuchtigkeit und Wind an. Die Daten werden serverseitig zwischengespeichert und standardmäßig höchstens alle 15 Minuten neu abgerufen. Das Intervall kann mit `WEATHER_REFRESH_SECONDS` angepasst werden.
 
+Erfolgreiche Wetterabrufe werden dauerhaft in SQLite aufgezeichnet – auch wenn gerade niemand die Webseite geöffnet hat. Unter **Statistiken → Wetterverlauf** stehen Temperaturkurve, Minimum, Durchschnitt, Maximum sowie eine Tagesübersicht mit Wetterlage, Luftfeuchtigkeit und Wind bereit. Die Wetterhistorie liegt zusammen mit den übrigen Daten im persistenten Docker-Volume.
+
 Optional kann die PLZ bereits in `docker-compose.yml` vorbelegt werden:
 
 ```yaml

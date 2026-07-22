@@ -16,8 +16,9 @@
     .energy-summary,.power-profile{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}.power-card b{display:block;font-size:20px;margin:5px 0}
     .runtime-months{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin-top:14px}.runtime-month>span,.runtime-month>b{display:block}.runtime-month>b{margin-top:7px;line-height:1.35}.runtime-bar{height:7px;background:#061820;border-radius:99px;margin-top:8px;overflow:hidden}.runtime-bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
     .charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.chartbox{border:1px solid var(--line);border-radius:13px;padding:14px}.chart{width:100%;height:220px}
+    .weather-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.weather-days{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-top:14px}.weather-day{border:1px solid var(--line);border-radius:12px;padding:12px}.weather-day b,.weather-day span{display:block}.weather-day b{margin:5px 0}
     .reports{display:grid;gap:9px}.report{border:1px solid var(--line);border-radius:12px;padding:12px}.report a{background:var(--accent);color:#06202a;text-decoration:none;border-radius:9px;padding:8px 12px;font-weight:700}
-    @media(max-width:700px){.wrap{padding:13px}.top,.row{align-items:flex-start;flex-direction:column}.nav{justify-content:flex-start}.runtime-summary{grid-template-columns:1fr 1fr}.energy-summary,.power-profile{grid-template-columns:1fr}.runtime-months{grid-template-columns:1fr 1fr 1fr}.charts{grid-template-columns:1fr}}
+    @media(max-width:700px){.wrap{padding:13px}.top,.row{align-items:flex-start;flex-direction:column}.nav{justify-content:flex-start}.runtime-summary{grid-template-columns:1fr 1fr}.energy-summary,.power-profile{grid-template-columns:1fr}.runtime-months{grid-template-columns:1fr 1fr 1fr}.charts{grid-template-columns:1fr}.weather-summary,.weather-days{grid-template-columns:1fr 1fr}}
   </style>
 </head>
 <body>
@@ -34,7 +35,8 @@
     <p class="muted">Modell, Drehzahlen und Leistungswerte können unter „Pumpe“ individuell eingestellt werden.</p>
     <details><summary>Letzte Pumpenläufe</summary><div id="runtimeRuns" class="reports"></div></details>
   </section>
-  <section class="panel"><div class="row"><div><h2>Messwerte</h2><p class="muted">Aufgezeichnete Datenpunkte und berechneter Stromverbrauch der Filterpumpe.</p></div><select id="range" onchange="loadHistory()"><option value="168">7 Tage</option><option value="744">31 Tage</option><option value="8760" selected>1 Jahr</option><option value="26280">3 Jahre</option><option value="43800">5 Jahre</option></select></div><div id="charts" class="charts"></div></section>
+  <section class="panel"><div class="row"><div><h2>Messwerte</h2><p class="muted">Aufgezeichnete Datenpunkte und berechneter Stromverbrauch der Filterpumpe.</p></div><select id="range" onchange="loadHistory();loadWeatherHistory()"><option value="168">7 Tage</option><option value="744">31 Tage</option><option value="8760" selected>1 Jahr</option><option value="26280">3 Jahre</option><option value="43800">5 Jahre</option></select></div><div id="charts" class="charts"></div></section>
+  <section class="panel"><h2>Wetterverlauf</h2><p class="muted">Automatisch aufgezeichnete Außentemperatur und Wetterlage am hinterlegten Poolstandort.</p><div id="weatherSummary" class="weather-summary"></div><article class="chartbox"><b>Außentemperatur</b><div id="weatherChartMeta" class="muted"></div><canvas class="chart" id="weatherChart"></canvas></article><h3>Letzte Tage</h3><div id="weatherDays" class="weather-days"></div></section>
   <section class="panel"><h2>PDF-Wochenberichte</h2><p class="muted">Für jede abgeschlossene Kalenderwoche wird automatisch ein Bericht gespeichert.</p><div id="reports" class="reports"><p class="muted">Berichte werden geladen …</p></div></section>
 </main>
 <script src="/statistics.js"></script>

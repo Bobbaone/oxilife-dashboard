@@ -1,4 +1,5 @@
 import sqlite3
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,28 @@ ACCENT = colors.HexColor("#20bde9")
 DARK = colors.HexColor("#0d2632")
 MUTED = colors.HexColor("#607d89")
 DEFAULT_PUMP_WATTS = {1: 212, 2: 343, 3: 1134}
+
+
+def _weather_description(code):
+    if code == 0:
+        return "Sonnig"
+    if code in (1, 2):
+        return "Leicht bewölkt"
+    if code == 3:
+        return "Bewölkt"
+    if code in (45, 48):
+        return "Nebel"
+    if code is not None and 51 <= code <= 57:
+        return "Nieselregen"
+    if code is not None and 61 <= code <= 67:
+        return "Regen"
+    if code is not None and 71 <= code <= 77:
+        return "Schnee"
+    if code is not None and 80 <= code <= 82:
+        return "Regenschauer"
+    if code is not None and code >= 95:
+        return "Gewitter"
+    return "Unbekannt"
 
 
 def _number(value, decimals=2):
@@ -39,6 +62,8 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
     filter_runs = conn.execute("""SELECT * FROM filter_run_events
                                WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?""",
                                (end_ts, start_ts)).fetchall()
+    weather = conn.execute("""SELECT temperature,humidity,weather_code,wind_speed FROM weather_readings
+                            WHERE ts>=? AND ts<? ORDER BY ts""", (start_ts, end_ts)).fetchall()
     configured_watts = {}
     for speed, default in DEFAULT_PUMP_WATTS.items():
         row = conn.execute("SELECT value FROM app_settings WHERE key=?", (f"pump_stage_{speed}_watts",)).fetchone()
@@ -65,6 +90,9 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                              max(row["started_at"], start_ts)) * configured_watts.get(row["speed"], 0) / 3_600_000
                      for row in filter_runs)
     runtime_hours, runtime_minutes = divmod(runtime_seconds // 60, 60)
+    weather_temperatures = [row["temperature"] for row in weather if row["temperature"] is not None]
+    weather_codes = [int(row["weather_code"]) for row in weather if row["weather_code"] is not None]
+    dominant_weather = Counter(weather_codes).most_common(1)[0][0] if weather_codes else None
     story = [Paragraph("POOLMONITOR WOCHENBERICHT", styles["ReportTitle"]),
              Paragraph(f"{start:%d.%m.%Y} bis {end:%d.%m.%Y}", styles["Sub"]),
              Paragraph("Zusammenfassung", styles["Section"]),
@@ -72,7 +100,10 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                     ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")],
                     ["Pumpenlaufzeit", f"{runtime_hours} Std. {runtime_minutes} Min."],
                     ["Pumpenenergie (berechnet)", f"{energy_kwh:.2f} kWh".replace(".", ",")],
-                    ["Rückspülungen", str(len(backwashes))]], colWidths=[65*mm, 45*mm],
+                    ["Rückspülungen", str(len(backwashes))],
+                    ["Wetterlage", _weather_description(dominant_weather) if weather else "Keine Wetterdaten"],
+                    ["Außentemperatur min./max.", (f"{min(weather_temperatures):.1f} / {max(weather_temperatures):.1f} °C".replace(".", ",")
+                                                      if weather_temperatures else "-")]], colWidths=[65*mm, 45*mm],
                    style=TableStyle([("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#eaf7fb")),
                                      ("GRID", (0, 0), (-1, -1), .4, colors.HexColor("#c8dce4")),
                                      ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
