@@ -8,7 +8,7 @@ services:
     environment:
       TZ: Europe/Berlin
       TASMOTA_BASE_URL: ${TASMOTA_BASE_URL:-http://192.168.1.50}
-      TASMOTA_DISPLAY_NAME: ESP32
+      TASMOTA_DISPLAY_NAME: Modbus
       TASMOTA_STATUS_PATH: /cm?cmnd=Status%2010
       POLL_SECONDS: 10
       ADMIN_USER: admin

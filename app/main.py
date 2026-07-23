@@ -29,7 +29,7 @@ from starlette.middleware.sessions import SessionMiddleware
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", "/app/data/oxilife.db"))
 TASMOTA_BASE_URL = os.getenv("TASMOTA_BASE_URL", "").rstrip("/")
-TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "ESP32").strip() or "ESP32"
+TASMOTA_DISPLAY_NAME = os.getenv("TASMOTA_DISPLAY_NAME", "Modbus").strip() or "Modbus"
 STATUS_PATH = os.getenv("TASMOTA_STATUS_PATH", "/cm?cmnd=Status%2010")
 POLL_SECONDS = max(5, int(os.getenv("POLL_SECONDS", "10")))
 FILTER_TIMER_POLL_SECONDS = max(30, int(os.getenv("FILTER_TIMER_POLL_SECONDS", "60")))
@@ -334,8 +334,8 @@ def init_db() -> None:
                             widget_type='gauge',decimals=0,updated_at=?
                             WHERE lower(path) LIKE '%neopool.redox.data'""", (int(time.time()),))
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('redox_measurement_display_v1','1')")
-        if setting(conn, "tasmota_name", TASMOTA_DISPLAY_NAME).strip().lower() == "atomv5":
-            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('tasmota_name','ESP32')")
+        if setting(conn, "tasmota_name", TASMOTA_DISPLAY_NAME).strip().lower() in {"atomv5", "esp32"}:
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('tasmota_name','Modbus')")
 
 
 def hash_password(password: str) -> str:
