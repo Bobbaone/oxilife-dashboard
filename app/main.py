@@ -1897,7 +1897,7 @@ def filter_runtime(request: Request):
         energy = estimated_energy
         energy_source = "Pumpenprofil"
     monthly = []
-    for offset in range(-11, 1):
+    for offset in range(0, 1):
         start = month_start(local_now, offset)
         end = month_start(local_now, offset + 1)
         start_ts, end_ts = int(start.timestamp()), min(now, int(end.timestamp()))
