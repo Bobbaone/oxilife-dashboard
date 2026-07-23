@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PoolMonitor · Shelly-Test</title>
+  <style>
+    :root{--bg:#06151e;--card:#0d2632;--line:#1d3a46;--text:#eefaff;--muted:#8eabb7;--accent:#42c8f5;--good:#4fe0a1;--bad:#ff6070;--warn:#ffc45c}
+    *{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#061219,#09232d);color:var(--text);font-family:Inter,system-ui,sans-serif;min-height:100vh}.wrap{max-width:1050px;margin:auto;padding:28px 18px}.top,.config,.status{display:flex;align-items:center;justify-content:space-between;gap:14px}.muted{color:var(--muted)}a{color:var(--muted)}.panel{background:rgba(13,38,50,.94);border:1px solid var(--line);border-radius:18px;padding:22px;margin-top:18px}.config{justify-content:flex-start;flex-wrap:wrap}input{min-width:240px;background:#071a23;color:white;border:1px solid var(--line);border-radius:10px;padding:11px 13px;font:inherit}button{border:0;border-radius:10px;background:var(--accent);color:#05202a;font-weight:750;padding:12px 16px;cursor:pointer}.hero{display:grid;grid-template-columns:1.25fr 1fr;gap:14px}.power{font-size:clamp(54px,10vw,96px);font-weight:800;line-height:1}.power small{font-size:20px}.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:16px}.card{border:1px solid var(--line);border-radius:14px;padding:16px}.card b{display:block;font-size:24px;margin-top:6px}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}.bar{height:10px;border-radius:99px;background:#061820;overflow:hidden;margin-top:18px}.bar i{display:block;height:100%;background:linear-gradient(90deg,#42c8f5,#4fe0a1);border-radius:99px}.msg{margin-top:10px;min-height:22px}.raw-wrap{margin-top:18px}.raw{white-space:pre-wrap;overflow:auto;max-height:260px;background:#061820;border:1px solid var(--line);border-radius:12px;padding:12px;color:var(--muted);font-size:12px}@media(max-width:700px){.hero,.cards{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body><main class="wrap">
+  <div class="top"><div><h1>Shelly-Stromtest</h1><p class="muted">Shelly Plug M · lokale Abfrage, nur lesend</p></div><a href="/statistics">← Statistiken</a></div>
+  <section class="panel"><h2>Verbindung</h2><div class="config"><input id="ip" inputmode="decimal" placeholder="Shelly-IP, z. B. 192.168.5.233"><button onclick="save()">Verbinden und speichern</button><button onclick="load()">Neu abrufen</button></div><div id="msg" class="msg muted"></div></section>
+  <section id="result" class="panel" hidden>
+    <div class="hero"><div><span class="muted">Pooltechnik aktuell</span><div class="power"><span id="power">–</span> <small>W</small></div><div class="bar"><i id="bar"></i></div></div><div class="card"><span class="muted">Status</span><b id="status">–</b><p id="device" class="muted"></p></div></div>
+    <div class="cards">
+      <div class="card"><span class="muted">Gesamtverbrauch</span><b id="total">–</b></div>
+      <div class="card"><span class="muted">Spannung</span><b id="voltage">–</b></div>
+      <div class="card"><span class="muted">Strom</span><b id="current">–</b></div>
+      <div class="card"><span class="muted">Gerätetemperatur</span><b id="temp">–</b></div>
+    </div>
+    <details class="raw-wrap"><summary>Rohdaten anzeigen</summary><pre id="raw" class="raw"></pre></details>
+  </section>
+</main><script>
+const $=id=>document.getElementById(id),fmt=(value,digits=2)=>Number(value).toLocaleString('de-DE',{minimumFractionDigits:digits,maximumFractionDigits:digits});
+async function api(url,options){const response=await fetch(url,options),data=await response.json();if(response.status===401){location.href='/admin';throw Error('Anmeldung erforderlich')}if(!response.ok)throw Error(data.detail||'Fehler');return data}
+function render(data){const s=data.shelly;$('ip').value=data.ip_address;$('power').textContent=fmt(s.power_w,0);$('bar').style.width=Math.min(100,Math.max(0,s.power_w)/2500*100)+'%';$('status').textContent=s.output?'Ein · Online':'Aus · Online';$('status').className=s.output?'good':'warn';const device=s.device||{};$('device').textContent=(device.name||device.app||'Shelly Plug M')+' · '+(device.id||device.mac||'lokal');$('total').textContent=fmt(s.total_kwh)+' kWh';$('voltage').textContent=fmt(s.voltage_v,1)+' V';$('current').textContent=fmt(s.current_a,2)+' A';$('temp').textContent=s.temperature_c==null?'–':fmt(s.temperature_c,1)+' °C';$('raw').textContent=JSON.stringify(s.raw,null,2);$('result').hidden=false;$('msg').textContent='Verbunden mit '+data.ip_address+' · letzter Abruf '+new Date(s.updated_at*1000).toLocaleTimeString('de-DE')}
+async function load(){try{$('msg').textContent='Shelly wird abgefragt …';const data=await api('/api/admin/shelly-preview');if(!data.configured){$('ip').value=data.ip_address||'192.168.5.233';$('msg').textContent='IP prüfen und auf „Verbinden und speichern“ klicken.';return}render(data)}catch(error){$('msg').textContent=error.message}}
+async function save(){try{$('msg').textContent='Verbindung wird getestet …';const data=await api('/api/admin/shelly-preview',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip_address:$('ip').value.trim()})});render(data)}catch(error){$('msg').textContent=error.message}}
+load();
+</script></body></html>

@@ -51,6 +51,7 @@ ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
 ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")))
 WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900")))
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
+DEFAULT_SHELLY_IP = os.getenv("SHELLY_PLUG_IP", "192.168.5.233").strip()
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
     "0": os.getenv("FILTER_OFF_COMMAND", "/cm?cmnd=NPFiltration%200"),
@@ -99,6 +100,10 @@ class WeatherUpdate(BaseModel):
 
 
 class SolarUpdate(BaseModel):
+    ip_address: str = Field(min_length=7, max_length=45)
+
+
+class ShellyUpdate(BaseModel):
     ip_address: str = Field(min_length=7, max_length=45)
 
 
@@ -244,6 +249,9 @@ def init_db() -> None:
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('password_change_required','1')")
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('session_token',?)", (secrets.token_urlsafe(32),))
         conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('pump_model','SPECK BADU Delta Eco VS')")
+        if DEFAULT_SHELLY_IP:
+            conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('shelly_plug_ip',?)",
+                         (validated_local_ip(DEFAULT_SHELLY_IP, "Shelly Plug M"),))
         for speed, profile in DEFAULT_PUMP_POWER_PROFILE.items():
             conn.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)",
                          (f"pump_stage_{speed}_rpm", str(profile["rpm"])))
@@ -517,18 +525,18 @@ async def current_weather(force: bool = False) -> dict[str, Any]:
             return {"enabled": True, **location, "stale": True, "error": f"Wetterdaten nicht verfügbar: {exc}"}
 
 
-def validated_local_ip(value: str) -> str:
+def validated_local_ip(value: str, device_name: str = "Gerät") -> str:
     try:
         address = ipaddress.ip_address(value.strip())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Bitte eine gültige IP-Adresse eingeben") from exc
     if not address.is_private:
-        raise HTTPException(status_code=400, detail="Der EZ1 muss eine lokale, private IP-Adresse verwenden")
+        raise HTTPException(status_code=400, detail=f"{device_name} muss eine lokale, private IP-Adresse verwenden")
     return str(address)
 
 
 async def read_ez1(ip_address: str) -> dict[str, Any]:
-    base_url = f"http://{validated_local_ip(ip_address)}:8050"
+    base_url = f"http://{validated_local_ip(ip_address, 'Der EZ1')}:8050"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             output_response, info_response, power_response, alarm_response = await asyncio.gather(
@@ -556,6 +564,41 @@ async def read_ez1(ip_address: str) -> dict[str, Any]:
                   "today_kwh": float(values.get("e1", 0) or 0) + float(values.get("e2", 0) or 0),
                   "total_kwh": float(values.get("te1", 0) or 0) + float(values.get("te2", 0) or 0)},
         "alarms": alarms, "alarm_active": any(str(value) not in {"0", ""} for value in alarms.values()),
+    }
+
+
+async def read_shelly_plug(ip_address: str) -> dict[str, Any]:
+    base_url = f"http://{validated_local_ip(ip_address, 'Shelly Plug M')}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            status_response, info_response = await asyncio.gather(
+                client.get(base_url + "/rpc/Switch.GetStatus", params={"id": 0}),
+                client.get(base_url + "/rpc/Shelly.GetDeviceInfo"),
+            )
+            status_response.raise_for_status()
+            status = status_response.json()
+            info = info_response.json() if info_response.status_code < 400 else {}
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Shelly Plug M nicht erreichbar: {exc}") from exc
+    energy = status.get("aenergy") or {}
+    temperature = status.get("temperature") or {}
+    total_wh = float(energy.get("total", 0) or 0)
+    return {
+        "online": True,
+        "updated_at": int(time.time()),
+        "device": info,
+        "output": bool(status.get("output")),
+        "source": status.get("source", ""),
+        "power_w": float(status.get("apower", 0) or 0),
+        "voltage_v": float(status.get("voltage", 0) or 0),
+        "current_a": float(status.get("current", 0) or 0),
+        "frequency_hz": float(status.get("freq", 0) or 0),
+        "power_factor": status.get("pf"),
+        "temperature_c": temperature.get("tC"),
+        "total_wh": total_wh,
+        "total_kwh": total_wh / 1000,
+        "minute_ts": energy.get("minute_ts"),
+        "raw": status,
     }
 
 
@@ -1344,6 +1387,12 @@ def solar_preview_page():
                         headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
+@app.get("/shelly-preview")
+def shelly_preview_page():
+    return FileResponse(BASE / "static" / "shelly-preview.html", media_type="text/html",
+                        headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
 @app.get("/pump")
 def pump_page():
     content = (BASE / "static" / "pump.html").read_text(encoding="utf-8")
@@ -1426,11 +1475,31 @@ async def solar_preview(request: Request):
 @app.put("/api/admin/solar-preview")
 async def update_solar_preview(body: SolarUpdate, request: Request):
     require_admin(request)
-    ip_address = validated_local_ip(body.ip_address)
+    ip_address = validated_local_ip(body.ip_address, "Der EZ1")
     solar = await read_ez1(ip_address)
     with db() as conn:
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('ez1_ip',?)", (ip_address,))
     return {"configured": True, "ip_address": ip_address, "solar": solar}
+
+
+@app.get("/api/admin/shelly-preview")
+async def shelly_preview(request: Request):
+    require_admin(request)
+    with db() as conn:
+        ip_address = setting(conn, "shelly_plug_ip", DEFAULT_SHELLY_IP)
+    if not ip_address:
+        return {"configured": False, "ip_address": DEFAULT_SHELLY_IP}
+    return {"configured": True, "ip_address": ip_address, "shelly": await read_shelly_plug(ip_address)}
+
+
+@app.put("/api/admin/shelly-preview")
+async def update_shelly_preview(body: ShellyUpdate, request: Request):
+    require_admin(request)
+    ip_address = validated_local_ip(body.ip_address, "Shelly Plug M")
+    shelly = await read_shelly_plug(ip_address)
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('shelly_plug_ip',?)", (ip_address,))
+    return {"configured": True, "ip_address": ip_address, "shelly": shelly}
 
 
 @app.get("/api/admin/connection")

@@ -191,6 +191,10 @@ Die vorhandenen Filterstufen- und Rückspülfunktionen bleiben erhalten. Die vor
 
 Unter **Pumpe → Pumpenprofil** können Pumpenmodell, Drehzahl und Leistungsaufnahme in Watt für die Stufen **Langsam**, **Mittel** und **Schnell** hinterlegt werden. Das Dashboard verwendet diese individuellen Werte für die Stromverbrauchsdiagramme, die kWh-Zusammenfassungen und die PDF-Wochenberichte. Die Konfiguration wird persistent in SQLite gespeichert und bleibt bei Container-Updates erhalten.
 
+### Shelly Plug M Stromtest
+
+Ein Shelly Plug M kann lokal über die Gen2/Gen3-RPC-API abgefragt werden. Die voreingestellte IP ist `192.168.5.233` und kann per `SHELLY_PLUG_IP` in `.env` oder Docker Compose geändert werden. Die Testansicht ist unter `/shelly-preview` erreichbar und zeigt aktuell gemessene Leistung, Gesamtverbrauch, Spannung, Strom und Rohdaten. Die Abfrage ist nur lesend und nutzt `Switch.GetStatus?id=0`.
+
 ## Datenspeicherung
 
 SQLite liegt unter `/app/data/oxilife.db`. Docker Compose bindet dafür das benannte Volume `oxilife-dashboard-data` ein. Ein bestehendes bind-mount-basiertes `./data/oxilife.db` wird nicht automatisch in das neue Volume kopiert; bei einem Upgrade die Datei einmalig übernehmen oder den bisherigen Mount beibehalten.
