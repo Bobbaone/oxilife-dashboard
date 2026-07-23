@@ -11,6 +11,7 @@ services:
       TASMOTA_DISPLAY_NAME: Modbus
       TASMOTA_STATUS_PATH: /cm?cmnd=Status%2010
       SHELLY_PLUG_IP: ${SHELLY_PLUG_IP:-192.168.5.233}
+      SHELLY_POLL_SECONDS: ${SHELLY_POLL_SECONDS:-60}
       POLL_SECONDS: 10
       ADMIN_USER: admin
       ADMIN_PASSWORD: wasserwerte

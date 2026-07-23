@@ -193,7 +193,9 @@ Unter **Pumpe → Pumpenprofil** können Pumpenmodell, Drehzahl und Leistungsauf
 
 ### Shelly Plug M Stromtest
 
-Ein Shelly Plug M kann lokal über die Gen2/Gen3-RPC-API abgefragt werden. Die voreingestellte IP ist `192.168.5.233` und kann per `SHELLY_PLUG_IP` in `.env` oder Docker Compose geändert werden. Die Testansicht ist unter `/shelly-preview` erreichbar und zeigt aktuell gemessene Leistung, Gesamtverbrauch, Spannung, Strom und Rohdaten. Die Abfrage ist nur lesend und nutzt `Switch.GetStatus?id=0`.
+Ein Shelly Plug M kann lokal über die Gen2/Gen3-RPC-API abgefragt werden. Die voreingestellte IP ist `192.168.5.233` und kann per `SHELLY_PLUG_IP` in `.env` oder Docker Compose geändert werden. Das Pollintervall wird über `SHELLY_POLL_SECONDS` gesteuert und steht standardmäßig auf 60 Sekunden.
+
+Die Testansicht ist unter `/shelly-preview` erreichbar und zeigt aktuell gemessene Leistung, Gesamtverbrauch, Spannung, Strom und Rohdaten. Die Abfrage ist nur lesend und nutzt `Switch.GetStatus?id=0`. Sobald mindestens zwei Shelly-Messpunkte vorhanden sind, verwenden Statistiken und Stromdiagramme den echten Shelly-Verbrauch. Bis dahin bleibt das individuell hinterlegte Pumpenprofil der Fallback.
 
 ## Datenspeicherung
 

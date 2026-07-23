@@ -21,7 +21,7 @@ async function loadRuntime() {
   const data = await api("/api/admin/filter-runtime");
   const items = [["Heute",data.summary.today],["Diese Woche",data.summary.week],["Dieser Monat",data.summary.month],["Dieses Jahr",data.summary.year],["Gesamt",data.summary.total]];
   $("runtimeSummary").innerHTML = items.map(item => `<div class="runtime-card"><span class="muted">${item[0]}</span><b>${duration(item[1])}</b></div>`).join("");
-  $("energySummary").innerHTML = [["Energie heute",data.energy_kwh.today],["Energie dieses Jahr",data.energy_kwh.year],["Energie gesamt",data.energy_kwh.total]].map(item => `<div class="runtime-card"><span class="muted">${item[0]}</span><b>${kwh(item[1])}</b></div>`).join("");
+  $("energySummary").innerHTML = [["Energie heute",data.energy_kwh.today],["Energie dieses Jahr",data.energy_kwh.year],["Energie gesamt",data.energy_kwh.total]].map(item => `<div class="runtime-card"><span class="muted">${item[0]}</span><b>${kwh(item[1])}</b><div class="muted">${esc(data.energy_source || "Pumpenprofil")}</div></div>`).join("");
   const maximum = Math.max(1, ...data.monthly.map(item => item.seconds));
   $("runtimeMonths").innerHTML = data.monthly.map(item => `<div class="runtime-month"><span class="muted">${item.label}</span><b>${duration(item.seconds)}</b><div>${kwh(item.kwh)}</div><div class="runtime-bar"><i style="width:${item.seconds / maximum * 100}%"></i></div></div>`).join("");
   $("powerProfile").innerHTML = data.energy_by_speed.map(item => `<div class="power-card"><span class="muted">Stufe ${item.speed} · ${Number(item.rpm).toLocaleString("de-DE")} U/min</span><b>${item.watts} W</b><div>${kwh(item.kwh)} erfasst · individuell hinterlegt</div></div>`).join("");
@@ -54,7 +54,7 @@ function meaningful(series) {
 async function loadHistory() {
   const hours=$("range").value;
   const [data,energy]=await Promise.all([api("/api/admin/history?hours=" + hours),api("/api/admin/filter-energy-history?hours=" + hours)]), series=data.series.filter(meaningful);
-  const energyCard=`<article class="chartbox"><b>Stromverbrauch Pumpe</b><div class="muted">Gesamt ${kwh(energy.total)} · Verbrauch je ${energy.bucket_seconds < 3600 ? energy.bucket_seconds / 60 + " Minuten" : energy.bucket_seconds / 3600 + " Stunden"}</div><canvas class="chart" id="energyChart"></canvas></article>`;
+  const energyCard=`<article class="chartbox"><b>${energy.source === "Shelly Plug M" ? "Stromverbrauch Pooltechnik" : "Stromverbrauch Pumpe"}</b><div class="muted">Gesamt ${kwh(energy.total)} · ${esc(energy.source || "Pumpenprofil")} · Verbrauch je ${energy.bucket_seconds < 3600 ? energy.bucket_seconds / 60 + " Minuten" : energy.bucket_seconds / 3600 + " Stunden"}</div><canvas class="chart" id="energyChart"></canvas></article>`;
   $("charts").innerHTML=energyCard+series.map((item,index)=>`<article class="chartbox"><b>${esc(item.datapoint.name)}</b><div class="muted">Min ${item.stats.min ?? "–"} · Ø ${item.stats.avg == null ? "–" : Number(item.stats.avg).toFixed(item.datapoint.decimals)} · Max ${item.stats.max ?? "–"} · ${item.stats.samples} Werte</div><canvas class="chart" id="chart${index}"></canvas></article>`).join("");
   draw($("energyChart"),energy.values);
   series.forEach((item,index)=>draw($("chart"+index),item.values));

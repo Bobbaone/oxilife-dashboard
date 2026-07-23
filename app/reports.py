@@ -42,6 +42,19 @@ def _number(value, decimals=2):
     return "-" if value is None else f"{value:.{decimals}f}".replace(".", ",")
 
 
+def _shelly_energy_kwh(rows, start_ts, end_ts):
+    if len(rows) < 2:
+        return None
+    total_wh = 0.0
+    for previous, current in zip(rows, rows[1:]):
+        if current["ts"] < start_ts or current["ts"] >= end_ts:
+            continue
+        delta = float(current["total_wh"]) - float(previous["total_wh"])
+        if delta >= 0:
+            total_wh += delta
+    return total_wh / 1000
+
+
 def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_ts: int) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -64,6 +77,9 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
                                (end_ts, start_ts)).fetchall()
     weather = conn.execute("""SELECT temperature,humidity,weather_code,wind_speed FROM weather_readings
                             WHERE ts>=? AND ts<? ORDER BY ts""", (start_ts, end_ts)).fetchall()
+    shelly_rows = conn.execute("""SELECT ts,total_wh FROM shelly_readings
+                                WHERE ts>=COALESCE((SELECT MAX(ts) FROM shelly_readings WHERE ts<?),?)
+                                AND ts<? ORDER BY ts""", (start_ts, start_ts, end_ts)).fetchall()
     configured_watts = {}
     for speed, default in DEFAULT_PUMP_WATTS.items():
         row = conn.execute("SELECT value FROM app_settings WHERE key=?", (f"pump_stage_{speed}_watts",)).fetchone()
@@ -89,6 +105,9 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
     energy_kwh = sum(max(0, min(row["ended_at"] or row["last_seen_at"], end_ts) -
                              max(row["started_at"], start_ts)) * configured_watts.get(row["speed"], 0) / 3_600_000
                      for row in filter_runs)
+    shelly_energy = _shelly_energy_kwh(shelly_rows, start_ts, end_ts)
+    energy_label = "Pooltechnik-Energie (Shelly)" if shelly_energy is not None else "Pumpenenergie (berechnet)"
+    energy_kwh = shelly_energy if shelly_energy is not None else energy_kwh
     runtime_hours, runtime_minutes = divmod(runtime_seconds // 60, 60)
     weather_temperatures = [row["temperature"] for row in weather if row["temperature"] is not None]
     weather_codes = [int(row["weather_code"]) for row in weather if row["weather_code"] is not None]
@@ -99,7 +118,7 @@ def generate_weekly_report(db_path: Path, output_path: Path, start_ts: int, end_
              Table([["Erfasste Datenpunkte", str(len(points))], ["Abfragen", str(total)],
                     ["Erreichbarkeit", f"{availability:.1f} %".replace(".", ",")],
                     ["Pumpenlaufzeit", f"{runtime_hours} Std. {runtime_minutes} Min."],
-                    ["Pumpenenergie (berechnet)", f"{energy_kwh:.2f} kWh".replace(".", ",")],
+                    [energy_label, f"{energy_kwh:.2f} kWh".replace(".", ",")],
                     ["Rückspülungen", str(len(backwashes))],
                     ["Wetterlage", _weather_description(dominant_weather) if weather else "Keine Wetterdaten"],
                     ["Außentemperatur min./max.", (f"{min(weather_temperatures):.1f} / {max(weather_temperatures):.1f} °C".replace(".", ",")

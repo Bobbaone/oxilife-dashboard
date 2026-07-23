@@ -52,6 +52,7 @@ ALERT_COOLDOWN_SECONDS = max(60, int(os.getenv("ALERT_COOLDOWN_SECONDS", "3600")
 WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900")))
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 DEFAULT_SHELLY_IP = os.getenv("SHELLY_PLUG_IP", "192.168.5.233").strip()
+SHELLY_POLL_SECONDS = max(10, int(os.getenv("SHELLY_POLL_SECONDS", "60")))
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
     "0": os.getenv("FILTER_OFF_COMMAND", "/cm?cmnd=NPFiltration%200"),
@@ -71,6 +72,7 @@ LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
 security_logger = logging.getLogger("uvicorn.error")
 last_report_week: tuple[int, int] | None = None
+shelly_last_poll = 0
 
 
 class DatapointUpdate(BaseModel):
@@ -224,11 +226,23 @@ def init_db() -> None:
                 wind_speed REAL,
                 city TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS shelly_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL UNIQUE,
+                power_w REAL NOT NULL DEFAULT 0,
+                total_wh REAL NOT NULL DEFAULT 0,
+                voltage_v REAL,
+                current_a REAL,
+                frequency_hz REAL,
+                temperature_c REAL,
+                output INTEGER NOT NULL DEFAULT 0
+            );
             CREATE INDEX IF NOT EXISTS idx_readings_point_ts ON readings(datapoint_id, ts);
             CREATE INDEX IF NOT EXISTS idx_poll_events_ts ON poll_events(ts);
             CREATE INDEX IF NOT EXISTS idx_backwash_started_at ON backwash_events(started_at);
             CREATE INDEX IF NOT EXISTS idx_filter_run_started_at ON filter_run_events(started_at);
             CREATE INDEX IF NOT EXISTS idx_weather_readings_ts ON weather_readings(ts);
+            CREATE INDEX IF NOT EXISTS idx_shelly_readings_ts ON shelly_readings(ts);
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -694,6 +708,19 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         if suffix in path_key:
             name = candidate
             break
+    shelly_names = {
+        "shellyplug.output": "Pooltechnik Steckdose",
+        "shellyplug.power": "Pooltechnik Leistung",
+        "shellyplug.energy": "Pooltechnik Verbrauch",
+        "shellyplug.voltage": "Pooltechnik Spannung",
+        "shellyplug.current": "Pooltechnik Strom",
+        "shellyplug.frequency": "Netzfrequenz",
+        "shellyplug.temperature": "Shelly Temperatur",
+    }
+    for suffix, candidate in shelly_names.items():
+        if suffix in path_key:
+            name = candidate
+            break
     if ".modules." in path_key:
         module_names = {"ph": "pH", "redox": "Redox", "hydrolysis": "Hydrolyse",
                         "chlorine": "Chlor", "conductivity": "Leitfähigkeit", "ionization": "Ionisation"}
@@ -749,7 +776,19 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         if key in keys:
             unit = candidate
             break
-    if "neopool.ph." in path_key:
+    if "shellyplug.power" in path_key:
+        unit = "W"
+    elif "shellyplug.energy" in path_key:
+        unit = "kWh"
+    elif "shellyplug.voltage" in path_key:
+        unit = "V"
+    elif "shellyplug.current" in path_key:
+        unit = "A"
+    elif "shellyplug.frequency" in path_key:
+        unit = "Hz"
+    elif "shellyplug.temperature" in path_key:
+        unit = "°C"
+    elif "neopool.ph." in path_key:
         unit = "pH"
     elif "neopool.redox." in path_key:
         unit = "mV"
@@ -781,6 +820,10 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         scale = 0.01
     if "neopool.ph." in path_key:
         decimals = 2
+    elif "shellyplug.power" in path_key:
+        decimals = 1
+    elif "shellyplug.energy" in path_key:
+        decimals = 3
     elif "neopool.redox." in path_key or "neopool.conductivity" in path_key:
         decimals = 0
     elif "neopool.temperature" in path_key:
@@ -791,6 +834,12 @@ def datapoint_defaults(path: str, data_type: str, numeric_value: float | None = 
         widget_type = "status"
         unit = ""
         decimals = 0
+    if "shellyplug.output" in path_key:
+        widget_type = "status"
+        unit = ""
+        decimals = 0
+    elif "shellyplug.power" in path_key or "shellyplug.energy" in path_key:
+        widget_type = "gauge"
     if ".relay." in path_key or any(token in path_key for token in (
             ".hydrolysis.cover", ".hydrolysis.low", ".hydrolysis.fl1", ".hydrolysis.redox")):
         widget_type = "status"
@@ -1019,6 +1068,52 @@ def ingest(payload: dict[str, Any], now: int) -> list[tuple[int, str, Any, str]]
     return alerts
 
 
+def record_datapoint_value(conn: sqlite3.Connection, path: str, value: Any, now: int,
+                           sort_order: int = 500, chart: bool = False, visible: bool = False) -> None:
+    data_type, text_value, num_value = value_parts(value)
+    defaults = datapoint_defaults(path, data_type, num_value)
+    conn.execute("""INSERT INTO datapoints
+        (path,name,data_type,unit,visible,chart,sort_order,widget_type,scale,decimals,
+         auto_configured,last_value_text,last_value_num,last_seen,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+        data_type=excluded.data_type,last_value_text=excluded.last_value_text,
+        last_value_num=excluded.last_value_num,last_seen=excluded.last_seen,updated_at=excluded.updated_at,
+        name=CASE WHEN datapoints.auto_configured=1 THEN excluded.name ELSE datapoints.name END,
+        unit=CASE WHEN datapoints.auto_configured=1 THEN excluded.unit ELSE datapoints.unit END,
+        widget_type=CASE WHEN datapoints.auto_configured=1 THEN excluded.widget_type ELSE datapoints.widget_type END,
+        decimals=CASE WHEN datapoints.auto_configured=1 THEN excluded.decimals ELSE datapoints.decimals END,
+        scale=CASE WHEN datapoints.auto_configured=1 THEN excluded.scale ELSE datapoints.scale END""",
+                 (path, defaults["name"], data_type, defaults["unit"], int(visible), int(chart),
+                  sort_order, defaults["widget_type"], defaults["scale"], defaults["decimals"],
+                  text_value, num_value, now, now, now))
+    point = conn.execute("SELECT id,logging FROM datapoints WHERE path=?", (path,)).fetchone()
+    if point and point["logging"]:
+        conn.execute("INSERT INTO readings(datapoint_id,ts,value_text,value_num) VALUES(?,?,?,?)",
+                     (point["id"], now, text_value, num_value))
+
+
+def record_shelly_reading(data: dict[str, Any]) -> None:
+    now = int(data["updated_at"])
+    with db() as conn:
+        conn.execute("""INSERT OR IGNORE INTO shelly_readings
+            (ts,power_w,total_wh,voltage_v,current_a,frequency_hz,temperature_c,output)
+            VALUES (?,?,?,?,?,?,?,?)""",
+                     (now, data["power_w"], data["total_wh"], data["voltage_v"], data["current_a"],
+                      data["frequency_hz"], data["temperature_c"], int(data["output"])))
+        values = {
+            "ShellyPlug.Output": data["output"],
+            "ShellyPlug.Power": data["power_w"],
+            "ShellyPlug.Energy": data["total_kwh"],
+            "ShellyPlug.Voltage": data["voltage_v"],
+            "ShellyPlug.Current": data["current_a"],
+            "ShellyPlug.Frequency": data["frequency_hz"],
+            "ShellyPlug.Temperature": data["temperature_c"],
+        }
+        for index, (path, value) in enumerate(values.items()):
+            record_datapoint_value(conn, path, value, now, sort_order=60 + index,
+                                   chart=path in {"ShellyPlug.Power", "ShellyPlug.Energy"})
+
+
 def send_low_alert(name: str, value: Any, unit: str) -> None:
     if not all((SMTP_HOST, SMTP_FROM, ALERT_EMAIL_TO)):
         raise RuntimeError("SMTP_HOST, SMTP_FROM oder ALERT_EMAIL_TO fehlt")
@@ -1198,10 +1293,29 @@ async def poll_once() -> None:
         await _poll_once()
 
 
+async def poll_shelly_once(force: bool = False) -> None:
+    global shelly_last_poll
+    now = int(time.time())
+    if not force and now - shelly_last_poll < SHELLY_POLL_SECONDS:
+        return
+    shelly_last_poll = now
+    with db() as conn:
+        ip_address = setting(conn, "shelly_plug_ip", DEFAULT_SHELLY_IP)
+    if not ip_address:
+        return
+    data = await read_shelly_plug(ip_address)
+    record_shelly_reading(data)
+
+
 async def poller() -> None:
     global last_report_week
     while True:
         await poll_once()
+        try:
+            await poll_shelly_once()
+        except Exception:
+            # Shelly-Ausfälle dürfen Wasserwerte und Wetter nicht blockieren.
+            pass
         try:
             await current_weather()
         except Exception:
@@ -1489,7 +1603,9 @@ async def shelly_preview(request: Request):
         ip_address = setting(conn, "shelly_plug_ip", DEFAULT_SHELLY_IP)
     if not ip_address:
         return {"configured": False, "ip_address": DEFAULT_SHELLY_IP}
-    return {"configured": True, "ip_address": ip_address, "shelly": await read_shelly_plug(ip_address)}
+    shelly = await read_shelly_plug(ip_address)
+    record_shelly_reading(shelly)
+    return {"configured": True, "ip_address": ip_address, "shelly": shelly}
 
 
 @app.put("/api/admin/shelly-preview")
@@ -1497,6 +1613,7 @@ async def update_shelly_preview(body: ShellyUpdate, request: Request):
     require_admin(request)
     ip_address = validated_local_ip(body.ip_address, "Shelly Plug M")
     shelly = await read_shelly_plug(ip_address)
+    record_shelly_reading(shelly)
     with db() as conn:
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('shelly_plug_ip',?)", (ip_address,))
     return {"configured": True, "ip_address": ip_address, "shelly": shelly}
@@ -1675,6 +1792,37 @@ def filter_energy_kwh(rows: list[sqlite3.Row], start_ts: int, end_ts: int, now: 
     return sum(by_speed.values()), by_speed
 
 
+def shelly_energy_kwh(rows: list[sqlite3.Row], start_ts: int, end_ts: int) -> float | None:
+    relevant = [row for row in rows if row["ts"] <= end_ts]
+    if len(relevant) < 2:
+        return None
+    total_wh = 0.0
+    for previous, current in zip(relevant, relevant[1:]):
+        if current["ts"] < start_ts or current["ts"] > end_ts:
+            continue
+        delta = float(current["total_wh"]) - float(previous["total_wh"])
+        if delta >= 0:
+            total_wh += delta
+    return total_wh / 1000
+
+
+def shelly_energy_series(rows: list[sqlite3.Row], since: int, now: int, bucket: int) -> tuple[list[dict[str, Any]], float] | None:
+    if len(rows) < 2:
+        return None
+    bucket_start = since // bucket * bucket
+    values = {ts: 0.0 for ts in range(bucket_start, now + 1, bucket)}
+    for previous, current in zip(rows, rows[1:]):
+        if current["ts"] < since or current["ts"] > now:
+            continue
+        delta = float(current["total_wh"]) - float(previous["total_wh"])
+        if delta < 0:
+            continue
+        current_bucket = current["ts"] // bucket * bucket
+        values[current_bucket] = values.get(current_bucket, 0.0) + delta / 1000
+    series = [{"ts": ts, "value_num": round(value, 6)} for ts, value in values.items()]
+    return series, sum(item["value_num"] for item in series)
+
+
 @app.get("/api/admin/filter-energy-history")
 def filter_energy_history(request: Request, hours: int = 24):
     require_admin(request)
@@ -1684,6 +1832,14 @@ def filter_energy_history(request: Request, hours: int = 24):
     bucket = 300 if hours <= 48 else 1800 if hours <= 168 else 7200 if hours <= 744 else 21600 if hours <= 8760 else 86400
     bucket_start = since // bucket * bucket
     with db() as conn:
+        shelly_rows = conn.execute("""SELECT ts,total_wh FROM shelly_readings
+                                    WHERE ts>=COALESCE((SELECT MAX(ts) FROM shelly_readings WHERE ts<?),?)
+                                    AND ts<=? ORDER BY ts""", (since, since, now)).fetchall()
+        shelly_series = shelly_energy_series(shelly_rows, since, now, bucket)
+        if shelly_series:
+            series, total = shelly_series
+            return {"hours": hours, "bucket_seconds": bucket, "unit": "kWh", "total": total,
+                    "values": series, "updated_at": now, "source": "Shelly Plug M"}
         _, profile = pump_power_profile(conn)
         rows = conn.execute("""SELECT * FROM filter_run_events
                              WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?
@@ -1707,7 +1863,7 @@ def filter_energy_history(request: Request, hours: int = 24):
     series = [{"ts": ts, "value_num": round(value, 6)} for ts, value in values.items()]
     total = sum(item["value_num"] for item in series)
     return {"hours": hours, "bucket_seconds": bucket, "unit": "kWh", "total": total,
-            "values": series, "updated_at": now}
+            "values": series, "updated_at": now, "source": "Pumpenprofil"}
 
 
 @app.get("/api/admin/filter-runtime")
@@ -1724,12 +1880,22 @@ def filter_runtime(request: Request):
         rows = conn.execute("""SELECT * FROM filter_run_events
                              WHERE started_at<? AND COALESCE(ended_at,last_seen_at)>?
                              ORDER BY started_at""", (now + 1, 0)).fetchall()
+        shelly_rows = conn.execute("SELECT ts,total_wh FROM shelly_readings ORDER BY ts").fetchall()
     bounds = {"today": int(today.timestamp()), "week": int(week.timestamp()),
               "month": int(month.timestamp()), "year": int(year.timestamp())}
     summary = {key: filter_runtime_seconds(rows, start, now, now) for key, start in bounds.items()}
     summary["total"] = filter_runtime_seconds(rows, 0, now, now)
-    energy = {key: filter_energy_kwh(rows, start, now, now, profile_values)[0] for key, start in bounds.items()}
-    energy["total"], energy_by_speed = filter_energy_kwh(rows, 0, now, now, profile_values)
+    estimated_energy = {key: filter_energy_kwh(rows, start, now, now, profile_values)[0] for key, start in bounds.items()}
+    estimated_energy["total"], energy_by_speed = filter_energy_kwh(rows, 0, now, now, profile_values)
+    shelly_energy = {key: shelly_energy_kwh(shelly_rows, start, now) for key, start in bounds.items()}
+    shelly_total = shelly_energy_kwh(shelly_rows, 0, now)
+    if shelly_total is not None:
+        energy = {key: (shelly_energy[key] if shelly_energy[key] is not None else 0.0) for key in bounds}
+        energy["total"] = shelly_total
+        energy_source = "Shelly Plug M"
+    else:
+        energy = estimated_energy
+        energy_source = "Pumpenprofil"
     monthly = []
     for offset in range(-11, 1):
         start = month_start(local_now, offset)
@@ -1737,7 +1903,9 @@ def filter_runtime(request: Request):
         start_ts, end_ts = int(start.timestamp()), min(now, int(end.timestamp()))
         monthly.append({"key": start.strftime("%Y-%m"), "label": start.strftime("%m/%Y"),
                         "seconds": filter_runtime_seconds(rows, start_ts, end_ts, now),
-                        "kwh": filter_energy_kwh(rows, start_ts, end_ts, now, profile_values)[0]})
+                        "kwh": (shelly_energy_kwh(shelly_rows, start_ts, end_ts)
+                                if shelly_total is not None else
+                                filter_energy_kwh(rows, start_ts, end_ts, now, profile_values)[0]) or 0.0})
     recent = []
     max_gap = max(60, POLL_SECONDS * 3)
     for row in reversed(rows[-20:]):
@@ -1752,7 +1920,7 @@ def filter_runtime(request: Request):
                for speed, values in profile_values.items()]
     return {"summary": summary, "energy_kwh": energy, "energy_by_speed": profile,
             "monthly": monthly, "runs": len(rows), "recent": recent, "updated_at": now,
-            "pump_model": pump_model}
+            "pump_model": pump_model, "energy_source": energy_source}
 
 
 @app.get("/api/admin/pump-profile")
