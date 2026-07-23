@@ -61,6 +61,16 @@ COMMANDS = {
     "3": os.getenv("FILTER_SPEED_COMMAND_3", "/cm?cmnd=NPFiltrationspeed%203"),
     "backwash": os.getenv("BACKWASH_COMMAND", "/cm?cmnd=NPFiltrationmode%2013"),
 }
+FILTRATION_SETTING_COMMANDS = {
+    "heat_clima": os.getenv("FILTER_HEAT_CLIMA_COMMAND", "/cm?cmnd=NPWrite%200x417%2C{value}"),
+    "heat_temperature": os.getenv("FILTER_HEAT_TEMPERATURE_COMMAND", "/cm?cmnd=NPWrite%200x416%2C{value}"),
+    "smart_frost": os.getenv("FILTER_SMART_FROST_COMMAND", "/cm?cmnd=NPWrite%200x41A%2C{value}"),
+    "smart_min_temperature": os.getenv("FILTER_SMART_MIN_TEMPERATURE_COMMAND", "/cm?cmnd=NPWrite%200x419%2C{value}"),
+    "smart_max_temperature": os.getenv("FILTER_SMART_MAX_TEMPERATURE_COMMAND", "/cm?cmnd=NPWrite%200x418%2C{value}"),
+    "intel_temperature": os.getenv("FILTER_INTEL_TEMPERATURE_COMMAND", "/cm?cmnd=NPWrite%200x41C%2C{value}"),
+    "intel_hours": os.getenv("FILTER_INTEL_HOURS_COMMAND", "/cm?cmnd=NPWrite%200x41D%2C{value}"),
+    "intel_speed": os.getenv("FILTER_INTEL_SPEED_COMMAND", ""),
+}
 latest: dict[str, Any] = {"online": False, "updated_at": None, "raw": {}, "error": "Noch keine Daten empfangen"}
 poll_lock = asyncio.Lock()
 weather_lock = asyncio.Lock()
@@ -114,6 +124,17 @@ class FilterTimerUpdate(BaseModel):
     start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     speed: int = Field(default=1, ge=1, le=3)
+
+
+class FiltrationSpecialUpdate(BaseModel):
+    heat_clima: bool = False
+    heat_temperature: int = Field(default=28, ge=10, le=40)
+    smart_frost: bool = False
+    smart_min_temperature: int = Field(default=10, ge=0, le=40)
+    smart_max_temperature: int = Field(default=25, ge=0, le=40)
+    intel_temperature: int = Field(default=28, ge=10, le=40)
+    intel_hours: int = Field(default=8, ge=2, le=12)
+    intel_speed: int = Field(default=1, ge=1, le=3)
 
 
 class BackwashScheduleUpdate(BaseModel):
@@ -398,6 +419,66 @@ def pump_power_profile(conn: sqlite3.Connection | None = None) -> tuple[str, dic
             rpm, watts = defaults["rpm"], defaults["watts"]
         profile[speed] = {"rpm": rpm, "watts": watts, "measured": True}
     return model, profile
+
+
+def filtration_special_config(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    if conn is None:
+        with db() as own_conn:
+            return filtration_special_config(own_conn)
+
+    defaults: dict[str, Any] = {
+        "heat_clima": False,
+        "heat_temperature": 28,
+        "smart_frost": False,
+        "smart_min_temperature": 10,
+        "smart_max_temperature": 25,
+        "intel_temperature": 28,
+        "intel_hours": 8,
+        "intel_speed": 1,
+    }
+    result: dict[str, Any] = {}
+    for key, default in defaults.items():
+        value = setting(conn, f"filtration_{key}", str(int(default)) if isinstance(default, bool) else str(default))
+        if isinstance(default, bool):
+            result[key] = value in {"1", "true", "True", "yes", "on"}
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                result[key] = default
+    return result
+
+
+async def refresh_filtration_special_from_device() -> dict[str, Any] | None:
+    registers = {
+        "heat_temperature": "0x416",
+        "heat_clima": "0x417",
+        "smart_max_temperature": "0x418",
+        "smart_min_temperature": "0x419",
+        "smart_frost": "0x41A",
+        "intel_temperature": "0x41C",
+        "intel_hours": "0x41D",
+    }
+    values: dict[str, Any] = {}
+    try:
+        for key, address in registers.items():
+            data = command_register_data(await send_command(f"/cm?cmnd=NPRead%20{address}"), "NPRead")
+            value = register_int(data)
+            if key in {"heat_clima", "smart_frost"}:
+                values[key] = bool(value)
+            elif key == "intel_hours":
+                values[key] = max(2, min(12, round(value / 60)))
+            else:
+                values[key] = value
+    except HTTPException:
+        return None
+    if values:
+        with db() as conn:
+            for key, value in values.items():
+                conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+                             (f"filtration_{key}", str(int(value)) if isinstance(value, bool) else str(value)))
+        return filtration_special_config()
+    return None
 
 
 def weather_location() -> dict[str, Any] | None:
@@ -1946,6 +2027,35 @@ def update_pump_profile(update: PumpProfileUpdate, request: Request):
     return {"model": model, "stages": stages}
 
 
+@app.get("/api/admin/filtration-special")
+async def get_filtration_special(request: Request):
+    require_admin(request)
+    await refresh_filtration_special_from_device()
+    config = filtration_special_config()
+    commands = {key: bool(value.strip()) for key, value in FILTRATION_SETTING_COMMANDS.items()}
+    return {"config": config, "commands": commands}
+
+
+@app.put("/api/admin/filtration-special")
+async def update_filtration_special(update: FiltrationSpecialUpdate, request: Request):
+    require_admin(request)
+    if update.smart_min_temperature > update.smart_max_temperature:
+        raise HTTPException(status_code=400, detail="Smart: Mindesttemperatur darf nicht höher als Maximumtemperatur sein.")
+    values = update.model_dump()
+    sent: dict[str, Any] = {}
+    for key, value in values.items():
+        sent[key] = await send_optional_filtration_setting(key, value)
+    if any(item["configured"] for item in sent.values()):
+        await send_command("/cm?cmnd=NPExec")
+        await send_command("/cm?cmnd=NPSave")
+    with db() as conn:
+        for key, value in values.items():
+            conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
+                         (f"filtration_{key}", str(int(value)) if isinstance(value, bool) else str(value)))
+    return {"ok": True, "config": filtration_special_config(), "sent": sent,
+            "applied_to_oxilife": any(item["configured"] for item in sent.values())}
+
+
 @app.get("/api/admin/reports")
 async def weekly_reports(request: Request):
     require_admin(request)
@@ -2066,6 +2176,21 @@ async def send_command(path: str) -> Any:
             except Exception: return {"response": response.text}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def send_optional_filtration_setting(key: str, value: Any) -> dict[str, Any]:
+    template = FILTRATION_SETTING_COMMANDS.get(key, "").strip()
+    if not template:
+        return {"configured": False, "result": None}
+    command_value = int(value) if isinstance(value, bool) else value
+    if key == "intel_hours":
+        command_value = int(command_value) * 60
+    if "{value}" in template:
+        command = template.format(value=command_value)
+    else:
+        separator = "" if template.endswith(("%20", "=", ",")) else "%20"
+        command = f"{template}{separator}{command_value}"
+    return {"configured": True, "result": await send_command(command)}
 
 
 def neopool_payload(payload: Any) -> dict[str, Any] | None:

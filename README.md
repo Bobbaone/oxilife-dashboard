@@ -185,7 +185,13 @@ Das Dashboard nutzt STARTTLS. Pro Datenpunkt wird während eines anhaltenden Nie
 
 ## Anlagensteuerung
 
-Die vorhandenen Filterstufen- und Rückspülfunktionen bleiben erhalten. Die voreingetragenen Befehle sind Platzhalter und müssen vor dem Einsatz an einer echten Anlage geprüft werden.
+Die vorhandenen Filterstufen- und Rückspülfunktionen bleiben erhalten. Schreibende Befehle arbeiten über Tasmota/NeoPool und sollten nach Änderungen einmal an der echten Anlage geprüft werden.
+
+### Filtrationsmodi Heizung, Smart und Intelligent
+
+Unter **Pumpe → Filtration** können neben **Manuell** und **Automatik** auch **Heizung**, **Smart** und **Intelligent** eingestellt werden. Die bekannten Oxilife/NeoPool-Register werden direkt verwendet: Klima/Heizung `0x0417`, Heiz-Solltemperatur `0x0416`, Smart-Maximum `0x0418`, Smart-Minimum `0x0419`, Frostschutz `0x041A`, Intelligent-Temperatur `0x041C` und Intelligent-Mindestlaufzeit `0x041D`. Nach Änderungen sendet das Dashboard `NPExec` und `NPSave`.
+
+Wenn ein Gerät abweichende Register oder eigene Tasmota-Kommandos benötigt, können die Befehle per Umgebungsvariablen überschrieben werden: `FILTER_HEAT_CLIMA_COMMAND`, `FILTER_HEAT_TEMPERATURE_COMMAND`, `FILTER_SMART_FROST_COMMAND`, `FILTER_SMART_MIN_TEMPERATURE_COMMAND`, `FILTER_SMART_MAX_TEMPERATURE_COMMAND`, `FILTER_INTEL_TEMPERATURE_COMMAND`, `FILTER_INTEL_HOURS_COMMAND` und optional `FILTER_INTEL_SPEED_COMMAND`. In den Befehlen kann `{value}` als Platzhalter genutzt werden.
 
 ### Individuelles Pumpenprofil
 

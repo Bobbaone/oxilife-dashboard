@@ -53,6 +53,55 @@ async function savePumpProfile() {
   }
 }
 
+async function loadFiltrationSpecial() {
+  const info = $("specialmsg");
+  try {
+    const data = await api("/api/admin/filtration-special");
+    const config = data.config || {};
+    $("heatClima").checked = Boolean(config.heat_clima);
+    $("heatTemperature").value = config.heat_temperature;
+    $("smartFrost").checked = Boolean(config.smart_frost);
+    $("smartMinTemperature").value = config.smart_min_temperature;
+    $("smartMaxTemperature").value = config.smart_max_temperature;
+    $("intelTemperature").value = config.intel_temperature;
+    $("intelHours").value = config.intel_hours;
+    $("intelSpeed").value = String(config.intel_speed);
+    const missing = Object.entries(data.commands || {})
+      .filter(([, configured]) => !configured)
+      .map(([key]) => key);
+    info.textContent = missing.length
+      ? "Hinweis: Intelligent-Geschwindigkeit wird im Dashboard gespeichert; ein belastbares Oxilife-Register dafür ist noch nicht hinterlegt."
+      : "";
+  } catch (error) {
+    info.textContent = error.message;
+  }
+}
+
+async function saveFiltrationSpecial(silent = false) {
+  const info = $("specialmsg");
+  if (!silent) info.textContent = "Filtration-Spezialwerte werden gespeichert …";
+  const body = {
+    heat_clima: $("heatClima").checked,
+    heat_temperature: Number($("heatTemperature").value),
+    smart_frost: $("smartFrost").checked,
+    smart_min_temperature: Number($("smartMinTemperature").value),
+    smart_max_temperature: Number($("smartMaxTemperature").value),
+    intel_temperature: Number($("intelTemperature").value),
+    intel_hours: Number($("intelHours").value),
+    intel_speed: Number($("intelSpeed").value)
+  };
+  const data = await api("/api/admin/filtration-special", {method: "PUT", body: JSON.stringify(body)});
+  if (!silent) {
+    const missing = Object.entries(data.sent || {})
+      .filter(([, item]) => !item.configured)
+      .map(([key]) => key);
+    info.textContent = missing.length
+      ? "Gespeichert. Temperatur/Smart-Werte wurden an Oxilife gesendet; Intelligent-Geschwindigkeit bleibt lokal gespeichert."
+      : "Gespeichert und an Oxilife gesendet.";
+  }
+  return data;
+}
+
 async function loadBackwashSchedule() {
   const info = $("backwashScheduleInfo");
   try {
