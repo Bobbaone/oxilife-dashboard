@@ -32,5 +32,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/bobbaone/oxilife-dashboard:latest
+          build-args: |
+            APP_BUILD=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

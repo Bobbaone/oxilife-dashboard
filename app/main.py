@@ -53,6 +53,7 @@ WEATHER_REFRESH_SECONDS = max(300, int(os.getenv("WEATHER_REFRESH_SECONDS", "900
 WEATHER_POSTAL_CODE = os.getenv("WEATHER_POSTAL_CODE", "").strip()
 DEFAULT_SHELLY_IP = os.getenv("SHELLY_PLUG_IP", "192.168.5.233").strip()
 SHELLY_POLL_SECONDS = max(10, int(os.getenv("SHELLY_POLL_SECONDS", "60")))
+APP_BUILD = (os.getenv("APP_BUILD", "local").strip() or "local")[:7]
 REPORT_DIR = DB_PATH.parent / "reports"
 COMMANDS = {
     "0": os.getenv("FILTER_OFF_COMMAND", "/cm?cmnd=NPFiltration%200"),
@@ -1612,6 +1613,7 @@ def status():
     pool = detected_pool or {}
     filtration = pool.get("Filtration", {}) if isinstance(pool, dict) else {}
     return {"online": latest["online"], "updated_at": latest["updated_at"], "error": latest["error"],
+            "build": APP_BUILD,
             "server_time": datetime.now().astimezone().isoformat(),
             "next_filter_start": next_filter_start(filter_timer_cache["values"]),
             "filtration": {
