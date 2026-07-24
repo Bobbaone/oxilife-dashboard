@@ -24,10 +24,58 @@ document.addEventListener("DOMContentLoaded", () => {
   setInterval(loadBackwashEvents, 30000);
 });
 
+let selectedMode = 0;
+const renderCommittedMode = showMode;
+
+showMode = function showCommittedMode(mode) {
+  currentMode = mode;
+  selectedMode = mode;
+  renderCommittedMode(mode);
+  $("confirmMode").disabled = true;
+  $("modemsg").textContent = "Aktuell aktiv: " + modeLabels[mode] + ".";
+};
+
+function selectMode(mode) {
+  selectedMode = mode;
+  const committed = currentMode;
+  renderCommittedMode(mode);
+  currentMode = committed;
+  $("confirmMode").disabled = mode === currentMode;
+  $("modemsg").textContent = mode === currentMode
+    ? "Aktuell aktiv: " + modeLabels[currentMode] + "."
+    : "Ausgewählt: " + modeLabels[mode] + ". Noch nicht aktiv.";
+}
+
+function discardModeSelection() {
+  showMode(currentMode);
+}
+
+async function confirmModeSelection() {
+  const button = $("confirmMode");
+  button.disabled = true;
+  $("modemsg").textContent = "Auswahl und Werte werden an Oxilife gesendet und geprüft …";
+  try {
+    if ([2, 3, 4].includes(selectedMode)) await saveFiltrationSpecial(true);
+    await api("/api/filter-mode/" + selectedMode, {method: "POST"});
+    showMode(selectedMode);
+    $("modemsg").textContent = "Bestätigt und aktiv: " + modeLabels[selectedMode] + ".";
+  } catch (error) {
+    button.disabled = selectedMode === currentMode;
+    $("modemsg").textContent = error.message;
+  }
+}
+
 async function loadPumpProfile() {
   const info = $("pumpProfileMsg");
   try {
     const data = await api("/api/admin/pump-profile");
+    $("pumpProfileSource").textContent = "Aktive Datenquelle: " + data.source + ".";
+    $("manualProfile").hidden = !data.manual_entry;
+    $("shellyLive").hidden = !data.shelly;
+    if (data.shelly) {
+      const measured = new Date(data.shelly.updated_at * 1000).toLocaleString("de-DE");
+      $("shellyLive").textContent = `Live-Leistung: ${Number(data.shelly.power_w).toLocaleString("de-DE", {maximumFractionDigits: 1})} W · ${data.shelly.output ? "eingeschaltet" : "ausgeschaltet"} · gemessen ${measured}. Shelly-Livewerte werden automatisch für Verbrauch und Statistiken verwendet.`;
+    }
     $("pumpModel").value = data.model;
     for (const speed of [1, 2, 3]) {
       $("pumpRpm" + speed).value = data.stages[speed].rpm;

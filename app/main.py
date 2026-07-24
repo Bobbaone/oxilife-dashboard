@@ -2007,8 +2007,26 @@ def filter_runtime(request: Request):
 @app.get("/api/admin/pump-profile")
 def get_pump_profile(request: Request):
     require_admin(request)
-    model, stages = pump_power_profile()
-    return {"model": model, "stages": stages}
+    with db() as conn:
+        model, stages = pump_power_profile(conn)
+        latest_shelly = conn.execute(
+            "SELECT ts,power_w,output FROM shelly_readings ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    shelly_live = bool(
+        latest_shelly
+        and int(time.time()) - int(latest_shelly["ts"]) <= max(180, SHELLY_POLL_SECONDS * 3)
+    )
+    return {
+        "model": model,
+        "stages": stages,
+        "source": "Shelly Plug M" if shelly_live else "Manuelles Pumpenprofil",
+        "manual_entry": not shelly_live,
+        "shelly": ({
+            "power_w": latest_shelly["power_w"],
+            "output": bool(latest_shelly["output"]),
+            "updated_at": latest_shelly["ts"],
+        } if shelly_live else None),
+    }
 
 
 @app.put("/api/admin/pump-profile")
@@ -2017,6 +2035,12 @@ def update_pump_profile(update: PumpProfileUpdate, request: Request):
     if set(update.stages) != {1, 2, 3}:
         raise HTTPException(status_code=400, detail="Für die Pumpenstufen 1, 2 und 3 werden Werte benötigt")
     with db() as conn:
+        latest_shelly = conn.execute("SELECT ts FROM shelly_readings ORDER BY ts DESC LIMIT 1").fetchone()
+        if latest_shelly and int(time.time()) - int(latest_shelly["ts"]) <= max(180, SHELLY_POLL_SECONDS * 3):
+            raise HTTPException(
+                status_code=409,
+                detail="Shelly liefert Live-Daten. Ein manuelles Leistungsprofil ist nur ohne Shelly verfügbar.",
+            )
         conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('pump_model',?)", (update.model.strip(),))
         for speed, stage in update.stages.items():
             conn.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)",
